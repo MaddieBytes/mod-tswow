@@ -406,9 +406,34 @@ void BindObjects(sol::state_view& lua, sol::environment& environment)
         { return SetLuaObject(map.GetNativeHandle(), key, std::move(value)); },
         "HasObject", [](TSBattleground const& map, std::string const& key)
         { return HasLuaObject(map.GetNativeHandle(), key); },
-        "AddTimer", [](TSBattleground const& owner, double interval, double repeats,
-            sol::protected_function callback)
-        { return AddLuaTimer(owner, "", interval, repeats, 0, std::move(callback)); });
+        "AddTimer", sol::overload(
+            [](TSBattleground const& map, double delay, sol::protected_function callback)
+            { return AddLuaTimer(map, "", delay, 1, 0, std::move(callback)); },
+            [](TSBattleground const& map, double delay, double repeats, sol::protected_function callback)
+            { return AddLuaTimer(map, "", delay, repeats, 0, std::move(callback)); },
+            [](TSBattleground const& map, double delay, double repeats, double flags,
+                sol::protected_function callback)
+            { return AddLuaTimer(map, "", delay, repeats, static_cast<std::uint32_t>(flags),
+                std::move(callback)); }),
+        "AddNamedTimer", sol::overload(
+            [](TSBattleground const& map, std::string const& name, double delay,
+                sol::protected_function callback)
+            { return AddLuaTimer(map, name, delay, 1, 0, std::move(callback)); },
+            [](TSBattleground const& map, std::string const& name, double delay, double repeats,
+                sol::protected_function callback)
+            { return AddLuaTimer(map, name, delay, repeats, 0, std::move(callback)); },
+            [](TSBattleground const& map, std::string const& name, double delay, double repeats,
+                double flags, sol::protected_function callback)
+            { return AddLuaTimer(map, name, delay, repeats, static_cast<std::uint32_t>(flags),
+                std::move(callback)); }),
+        "RemoveTimer", [](TSBattleground const& map, std::string const& name)
+        {
+            for (std::shared_ptr<LuaTimer> const& timer : Timers)
+                if (timer->Owner.GetNativeHandle() == map.GetNativeHandle() && timer->Name == name)
+                    timer->Stopped = true;
+        },
+        "DoDelayed", [](TSBattleground const& map, sol::protected_function callback)
+        { DelayedCallbacks[map.GetNativeHandle()].emplace_back(map, std::move(callback)); });
     lua.new_usertype<LuaTimer>("TSTimer", sol::no_constructor,
         "Stop", &LuaTimer::Stop, "GetDelay", &LuaTimer::GetDelay, "SetDelay", &LuaTimer::SetDelay,
         "GetDiff", &LuaTimer::GetDiff, "GetFlags", &LuaTimer::GetFlags, "SetFlags", &LuaTimer::SetFlags,
