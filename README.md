@@ -51,9 +51,11 @@ The module requires [AzerothCore's mod-ale](https://github.com/azerothcore/mod-a
 adds a private TSTL environment, TSWoW bindings, callback cleanup, map-scoped objects, and timers to that
 shared state. Keep `TSWoW.LuaDir` separate from ALE's script directory so ALE does not execute generated
 TSTL files before the TSWoW bindings exist. The acceptance suite's currently used player, creature, map,
-battleground, spell, and custom-packet events are bound. Database/ORM bindings and the generated tag/data
-pipeline remain required before the unchanged `tswow-tests` entry point can load completely; unresolved
-generated tags fail with an explicit error.
+battleground, spell, and custom-packet events are bound. Plain and parameterized SQL and the generated Lua
+ORM use ALE's database globals. The unchanged `tswow-tests` livescripts compile and their complete entry
+point loads in the offline harness after resolving 15 test tags from a deterministic fixture. Those fixture
+IDs prove replacement and loading only; a real datascript run must still supply database rows and production
+IDs before server acceptance. Unresolved tags fail with an explicit error.
 
 Custom packets use AzerothCore's existing `ServerScript::CanPacketReceive` event. TSWoW's client-to-server
 opcode overlaps AzerothCore's TC9 redirect opcode, so the module consumes only packets with a valid TSWoW
@@ -64,8 +66,9 @@ module. Per-player receive buffers are module-owned and cleared on logout and li
 `Battleground.OnOpenDoors` currently forwards from AzerothCore's `OnBattlegroundStart`, which runs
 later in the same start transition after doors open. Exact before/after ordering remains a parity item.
 
-Windows validation currently covers a static AzerothCore worldserver build, a fragmented packet-runtime
-round trip with callback read-head reset, and an isolated full
+Windows validation currently covers a static AzerothCore worldserver build, an offline load of the complete
+resolved `tswow-tests` Lua entry point, focused plain/prepared/async SQL and generated ORM checks, a fragmented
+packet-runtime round trip with callback read-head reset, and an isolated full
 livescript chain: TypeScript transpilation, C++ DLL compilation without core libraries, DLL loading,
 `AddTSScripts` registration, custom-packet registration, typed packet reads and writes, callback cleanup,
 addon-message dispatch, quest-reward talent calculation, persistent functional-event object capture, mutex and
@@ -83,6 +86,7 @@ module-owned storage and are removed when the battleground is destroyed.
 | TSWoW capability | AzerothCore interface | Where | Timing and behavior | Reasoning |
 | --- | --- | --- | --- | --- |
 | Lua livescript runtime | ALE's public Lua state, recursive lock, state-close event, plus existing world and map hooks | [`src/TSLuaRuntime.cpp`](src/TSLuaRuntime.cpp), [`src/TsWowModule.cpp`](src/TsWowModule.cpp), and [`mod-tswow.cmake`](mod-tswow.cmake) | Loads TSTL modules into a private environment after native libraries, registers protected callbacks, advances TSWoW timers during world updates, clears map state on destruction, and releases all TSWoW Lua references before ALE closes its state. | ALE remains the single Lua runtime and retains its normal module behavior. `mod-tswow` adds only the compatibility layer whose event shapes ALE does not expose. No AzerothCore or ALE source patch is needed. |
+| Lua SQL and ORM | ALE `WorldDBQuery`, `CharDBQuery`, `AuthDBQuery`, and matching execute globals | [`src/TSLuaDatabase.cpp`](src/TSLuaDatabase.cpp) and [`LuaORM.ts`](https://github.com/MaddieBytes/tswow/blob/azerothcore-port/tswow-scripts/addons/LuaORM.ts) | Adapts TSWoW's GetRow-first result API, parameterized prepared-query builder, async sends, decorators, table creation, entry loading, dirty tracking, deletion, and container saves. New array rows obtain an explicit `UUID_SHORT()` index before their normal prepared save. | ALE already formats and escapes runtime parameters and owns database execution. Explicit row IDs remove the old connection-pinned `LAST_INSERT_ID()` sequence, so no database-pool accessor or AzerothCore patch is needed. Binary fields, SQL NULL parameters, database credential inspection, schema migration, and real database execution remain explicit runtime acceptance items. |
 | Custom client packet receive | Existing `ServerScript::CanPacketReceive` | [`src/TsWowModule.cpp`](src/TsWowModule.cpp) | Runs before opcode dispatch. The module consumes only opcode `0x51F` packets with a structurally valid TSWoW fragment header and returns `false`; all other packets continue normally. | AzerothCore already exposes the required cancellable packet event. Header validation preserves TC9 redirect traffic that shares the opcode, so no core hook is needed. |
 | World packet observation | Existing `ServerScript::CanPacketReceive` and `CanPacketSend` | [`src/TsWowModule.cpp`](src/TsWowModule.cpp) | Fires mapped receive/send callbacks by opcode before dispatch or transmission. Packet observation does not alter AzerothCore's allow decision. | The existing hooks provide the packet, session player, opcode, and required timing. The custom-packet decoder remains a second step in the receive adapter. |
 | Game-object interaction | Existing `AllGameObjectScript` hooks | [`src/TsWowModule.cpp`](src/TsWowModule.cpp) | Forwards update, destruction, damage, state, loot-state, gossip, quest, and removal events by game-object entry. Gossip cancellation is returned to AzerothCore. | The global hooks preserve the established callback arguments and allow TSWoW to coexist with database-bound game-object scripts. |

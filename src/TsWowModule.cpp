@@ -1198,6 +1198,7 @@ public:
             ts_events.Battleground.OnPlayerLogoutCallbacks.Fire(battleground->GetMapId(),
                 WrapBattleground(battleground), WrapPlayer(player));
         ts_events.Player.OnLogoutCallbacks.Fire(WrapPlayer(player));
+        ClearLuaEntityState(player);
         CustomPacketBuffers.erase(player->GetGUID().GetRawValue());
     }
     void OnPlayerCreate(Player* player) override { ts_events.Player.OnCreateCallbacks.Fire(WrapPlayer(player)); }

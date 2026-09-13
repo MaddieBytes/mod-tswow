@@ -4,6 +4,7 @@
 #include "LuaEngine.h"
 #include "TSAll.h"
 #include "TSEvents.h"
+#include "TSLuaDatabase.h"
 
 #include <sol/sol.hpp>
 
@@ -169,12 +170,21 @@ void BindObjects(sol::state_view& lua, sol::environment& environment)
     environment.set_function("CreateMutexLock", [] { return TSMutex(); });
     environment.set_function("CreateArray", [](sol::table table) { return table; });
     environment.set_function("CreateDictionary", [](sol::table table) { return table; });
+    environment.set_function("CreateGUID", sol::overload(
+        [](double high, double counter)
+        { return CreateGUID(static_cast<std::uint32_t>(high), static_cast<std::uint32_t>(counter)); },
+        [](double high, double entry, double counter)
+        {
+            return CreateGUID(static_cast<std::uint32_t>(high), static_cast<std::uint32_t>(entry),
+                static_cast<std::uint32_t>(counter));
+        }));
+    environment.set_function("EmptyGUID", [] { return EmptyGUID(); });
 
     lua.new_usertype<TSGUID>("TSGUID", sol::no_constructor,
         "GetCounter", &TSGUID::GetCounter, "GetLow", &TSGUID::GetLow, "GetType", &TSGUID::GetType,
         "GetEntry", &TSGUID::GetEntry, "IsEmpty", &TSGUID::IsEmpty, "IsPlayer", &TSGUID::IsPlayer,
         "IsCreature", &TSGUID::IsCreature, "IsGameObject", &TSGUID::IsGameObject,
-        "stringify", &TSGUID::stringify);
+        "stringify", [](TSGUID const& guid) { return guid.stringify(); });
 
     lua.new_usertype<TSMap>("TSMap", sol::no_constructor,
         "IsNull", &TSMap::IsNull, "IsBG", &TSMap::IsBG, "ToBG", &TSMap::ToBG,
@@ -200,7 +210,15 @@ void BindObjects(sol::state_view& lua, sol::environment& environment)
         "GossipComplete", &TSPlayer::GossipComplete, "GossipSendTextMenu", &TSPlayer::GossipSendTextMenu,
         "GossipClearMenu", &TSPlayer::GossipClearMenu, "SetTaxiCheat", &TSPlayer::SetTaxiCheat,
         "SendUpdateWorldState", &TSPlayer::SendUpdateWorldState, "SendAddonMessage", &TSPlayer::SendAddonMessage,
-        "Teleport", &TSPlayer::Teleport);
+        "Teleport", &TSPlayer::Teleport,
+        "GetObject", [](TSPlayer const& player, std::string const& key, sol::object defaultValue)
+        {
+            auto& values = EntityState[player.GetNativeHandle()];
+            auto found = values.find(key);
+            if (found != values.end())
+                return found->second;
+            return values.emplace(key, std::move(defaultValue)).first->second;
+        });
     lua.new_usertype<TSSpell>("TSSpell", sol::no_constructor,
         "IsNull", &TSSpell::IsNull, "GetCaster", &TSSpell::GetCaster);
     lua.new_usertype<TSBattleground>("TSBattleground", sol::no_constructor, sol::base_classes, sol::bases<TSMap>(),
@@ -349,6 +367,20 @@ void BindGlobals(sol::state_view& lua, sol::environment& environment)
         "local c = require('lualib_bundle').__TS__Class(); c.name = 'TSClass'; "
         "function c.prototype.____constructor(self) end; return c",
         environment, sol::script_pass_on_error);
+    environment["DBEntry"] = lua.safe_script(
+        "local c = require('lualib_bundle').__TS__Class(); c.name = 'DBEntry'; "
+        "function c.prototype.____constructor(self) end; return c",
+        environment, sol::script_pass_on_error);
+    environment["DBArrayEntry"] = lua.safe_script(
+        "local c = require('lualib_bundle').__TS__Class(); c.name = 'DBArrayEntry'; "
+        "function c.prototype.____constructor(self) self.__index = 0; self.__dirty = true; "
+        "self.__deleted = false end; function c.prototype.MarkDirty(self) self.__dirty = true end; "
+        "function c.prototype.IsDirty(self) return self.__dirty end; "
+        "function c.prototype.Delete(self) self.__deleted = true; self.__dirty = true end; "
+        "function c.prototype.IsDeleted(self) return self.__deleted end; "
+        "function c.prototype.Index(self) return self.__index end; return c",
+        environment, sol::script_pass_on_error);
+    BindLuaDatabaseCompatibility(lua, environment);
     (void)bundle;
 }
 
