@@ -48,6 +48,7 @@
 #include "Weather.h"
 #include "WorldPacket.h"
 #include "WorldSession.h"
+#include "WorldSessionMgr.h"
 
 #include <algorithm>
 #include <cctype>
@@ -58,6 +59,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <regex>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -392,6 +394,14 @@ std::string Lowercase(std::string value)
     return value;
 }
 
+std::string NormalizeSqlType(std::string value)
+{
+    static std::regex const integerDisplayWidth(
+        R"(\b(tinyint|smallint|mediumint|int|bigint)\([0-9]+\))"
+    );
+    return std::regex_replace(Lowercase(std::move(value)), integerDisplayWidth, "$1");
+}
+
 void CreateDatabaseTable(std::uint8_t database, std::string const& databaseName,
     std::string const& tableName, std::vector<FieldSpec> const& fields)
 {
@@ -454,7 +464,7 @@ void CreateNativeDatabaseSpec(std::uint8_t database, std::string const& database
         std::vector<std::pair<std::string, std::string>> result;
         for (FieldSpec const& field : values)
             if (field.m_isPrimaryKey)
-                result.emplace_back(Lowercase(field.m_name), Lowercase(field.m_typeName) +
+                result.emplace_back(Lowercase(field.m_name), NormalizeSqlType(field.m_typeName) +
                     (field.m_autoIncrements ? " auto_increment" : ""));
         return result;
     };
@@ -472,7 +482,7 @@ void CreateNativeDatabaseSpec(std::uint8_t database, std::string const& database
             { return Lowercase(field.m_name) == oldField.m_name; });
         if (current == fields.end())
             DatabaseQuery(database, "ALTER TABLE " + qualified + " DROP COLUMN " + QuoteIdentifier(oldField.m_name));
-        else if (Lowercase(current->m_typeName) != oldField.m_typeName)
+        else if (NormalizeSqlType(current->m_typeName) != NormalizeSqlType(oldField.m_typeName))
             DatabaseQuery(database, "ALTER TABLE " + qualified + " MODIFY COLUMN " + QuoteIdentifier(current->m_name) +
                 " " + current->m_typeName);
     }
@@ -1388,6 +1398,12 @@ public:
     void OnShutdown() override
     {
         ts_events.World.OnShutdownCallbacks.Fire();
+        for (auto const& [accountId, session] : sWorldSessionMgr->GetAllSessions())
+        {
+            (void)accountId;
+            if (Player* player = session->GetPlayer())
+                ts_events.Player.OnSaveCallbacks.Fire(WrapPlayer(player));
+        }
         UnloadLivescripts();
     }
 };
