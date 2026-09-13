@@ -276,6 +276,52 @@ bool TeleportPlayer(void* playerHandle, std::uint32_t map, float x, float y, flo
     return player->TeleportTo(map, x, y, z, orientation);
 }
 
+bool PlayerHasItem(void* player, std::uint32_t item, std::uint32_t count, bool checkBank)
+{
+    return static_cast<Player*>(player)->HasItemCount(item, count, checkBank);
+}
+
+std::uint16_t GetPlayerSkillValue(void* player, std::uint32_t skill)
+{
+    return static_cast<Player*>(player)->GetSkillValue(skill);
+}
+
+void SetPlayerSkill(void* player, std::uint16_t id, std::uint16_t step, std::uint16_t value,
+    std::uint16_t maximum)
+{
+    static_cast<Player*>(player)->SetSkill(id, step, value, maximum);
+}
+
+void PlayPlayerDirectSound(void* player, std::uint32_t sound, void* receiver)
+{
+    static_cast<Player*>(player)->PlayDirectSound(sound, static_cast<Player*>(receiver));
+}
+
+bool AddPlayerItem(void* player, std::uint32_t item, std::uint32_t count)
+{
+    return static_cast<Player*>(player)->AddItem(item, count);
+}
+
+void CompletePlayerQuestObjective(void* player, std::uint32_t quest)
+{
+    static_cast<Player*>(player)->AreaExploredOrEventHappens(quest);
+}
+
+void TeachPlayerSpell(void* player, std::uint32_t spell)
+{
+    static_cast<Player*>(player)->learnSpell(spell, false);
+}
+
+std::int32_t GetBattlegroundStartDelay(void* battleground)
+{
+    return static_cast<Battleground*>(battleground)->GetStartDelayTime();
+}
+
+void SetBattlegroundStartDelay(void* battleground, std::int32_t time)
+{
+    static_cast<Battleground*>(battleground)->SetStartDelayTime(time);
+}
+
 void ReadCustomPacketBytes(void* packet, std::uint32_t size, void* output)
 {
     char* bytes = static_cast<CustomPacketRead*>(packet)->ReadBytes(size, false);
@@ -457,6 +503,8 @@ TSBattlegroundApi const BattlegroundApi = {
     &GetBattlegroundPlayerCount,
     &GetBattlegroundPlayerAt,
     &GetBattlegroundScore,
+    &GetBattlegroundStartDelay,
+    &SetBattlegroundStartDelay,
     &PlayerApi,
     &UnitApi,
 };
@@ -484,6 +532,13 @@ TSPlayerApi const PlayerApi = {
     &SendPlayerCustomPacket,
     &SendPlayerAddonMessage,
     &TeleportPlayer,
+    &PlayerHasItem,
+    &GetPlayerSkillValue,
+    &SetPlayerSkill,
+    &PlayPlayerDirectSound,
+    &AddPlayerItem,
+    &CompletePlayerQuestObjective,
+    &TeachPlayerSpell,
 };
 
 TSPacketReadApi const PacketReadApi = {

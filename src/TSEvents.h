@@ -23,9 +23,11 @@ public:
     TSArray(std::initializer_list<T> values) : _values(std::make_shared<std::vector<T>>(values)) { }
     explicit TSArray(std::vector<T> values) : _values(std::make_shared<std::vector<T>>(std::move(values))) { }
     TSArray* operator->() { return this; }
+    TSArray const* operator->() const { return this; }
     std::size_t get_length() const { return _values->size(); }
     T& operator[](int index) { return (*_values)[index]; }
     T const& operator[](int index) const { return (*_values)[index]; }
+    std::string stringify(int indentation = 0) const;
 
     template <typename... Args>
     void push(Args&&... values)
@@ -221,13 +223,14 @@ struct TSMapApi
 class TSMap
 {
 public:
-    explicit TSMap(void* map = nullptr, TSMapApi const* api = nullptr) : _map(map), _api(api) { }
+    explicit TSMap(void* map = nullptr, TSMapApi const* api = nullptr) : __this(map), _map(map), _api(api) { }
     TSMap* operator->() { return this; }
     explicit operator bool() const { return _map != nullptr; }
     bool IsNull() const { return _map == nullptr; }
     void* GetNativeHandle() const { return _map; }
     bool IsBG() const { return _api && _map && _api->IsBG(_map); }
     TSBattleground ToBG() const;
+    void* __this;
 
 protected:
     void* _map;
@@ -242,6 +245,8 @@ struct TSBattlegroundApi
     std::size_t (*GetPlayerCount)(void*);
     void* (*GetPlayerAt)(void*, std::size_t);
     void* (*GetScore)(void*, std::uint32_t);
+    std::int32_t (*GetStartDelayTime)(void*);
+    void (*SetStartDelayTime)(void*, std::int32_t);
     TSPlayerApi const* PlayerApi;
     TSUnitApi const* UnitApi;
 };
@@ -252,7 +257,7 @@ public:
     explicit TSBattleground(void* battleground = nullptr, void* map = nullptr,
         TSMapApi const* mapApi = nullptr, TSBattlegroundApi const* battlegroundApi = nullptr,
         TSBattlegroundScoreApi const* scoreApi = nullptr) : TSMap(map, mapApi),
-        _battleground(battleground), _battlegroundApi(battlegroundApi), _scoreApi(scoreApi) { }
+        __this(battleground), _battleground(battleground), _battlegroundApi(battlegroundApi), _scoreApi(scoreApi) { }
     TSBattleground* operator->() { return this; }
     void* GetNativeBattlegroundHandle() const { return _battleground; }
     void UpdateWorldState(std::uint32_t variable, std::uint32_t value) const
@@ -272,6 +277,16 @@ public:
     }
     TSArray<TSPlayer> GetPlayers() const;
     TSBattlegroundScore GetScore(std::uint32_t guid) const;
+    TSNumber<std::int32_t> GetStartDelayTime() const
+    {
+        return _battlegroundApi && _battleground ? _battlegroundApi->GetStartDelayTime(_battleground) : 0;
+    }
+    void SetStartDelayTime(std::int32_t time) const
+    {
+        if (_battlegroundApi && _battleground)
+            _battlegroundApi->SetStartDelayTime(_battleground, time);
+    }
+    void* __this;
 
 private:
     void* _battleground;
@@ -407,13 +422,20 @@ struct TSPlayerApi
     void (*SendCustomPacket)(void*, std::uint16_t, char const*, std::uint32_t);
     void (*SendAddonMessage)(void*, char const*, char const*, std::uint8_t, void*);
     bool (*Teleport)(void*, std::uint32_t, float, float, float, float);
+    bool (*HasItem)(void*, std::uint32_t, std::uint32_t, bool);
+    std::uint16_t (*GetSkillValue)(void*, std::uint32_t);
+    void (*SetSkill)(void*, std::uint16_t, std::uint16_t, std::uint16_t, std::uint16_t);
+    void (*PlayDirectSound)(void*, std::uint32_t, void*);
+    bool (*AddItem)(void*, std::uint32_t, std::uint32_t);
+    void (*AreaExploredOrEventHappens)(void*, std::uint32_t);
+    void (*LearnSpell)(void*, std::uint32_t);
 };
 
 class TSUnit
 {
 public:
     explicit TSUnit(void* unit = nullptr, TSUnitApi const* api = nullptr,
-        TSPlayerApi const* playerApi = nullptr) : _unit(unit), _api(api), _playerApi(playerApi) { }
+        TSPlayerApi const* playerApi = nullptr) : __this(unit), _unit(unit), _api(api), _playerApi(playerApi) { }
     TSUnit* operator->() { return this; }
     explicit operator bool() const { return _unit != nullptr; }
     bool IsNull() const { return _unit == nullptr; }
@@ -431,6 +453,7 @@ public:
     {
         return TSMap(_api && _unit ? _api->GetMap(_unit) : nullptr, _api ? _api->MapApi : nullptr);
     }
+    void* __this;
 
 protected:
     void* _unit;
@@ -530,6 +553,38 @@ public:
     bool Teleport(std::uint32_t map, float x, float y, float z, float orientation) const
     {
         return _playerApiImpl && _unit && _playerApiImpl->Teleport(_unit, map, x, y, z, orientation);
+    }
+    bool HasItem(std::uint32_t item, std::uint32_t count = 1, bool checkBank = false) const
+    {
+        return _playerApiImpl && _unit && _playerApiImpl->HasItem(_unit, item, count, checkBank);
+    }
+    TSNumber<std::uint16_t> GetSkillValue(std::uint32_t skill) const
+    {
+        return _playerApiImpl && _unit ? _playerApiImpl->GetSkillValue(_unit, skill) : 0;
+    }
+    void SetSkill(std::uint16_t id, std::uint16_t step, std::uint16_t value, std::uint16_t maximum) const
+    {
+        if (_playerApiImpl && _unit)
+            _playerApiImpl->SetSkill(_unit, id, step, value, maximum);
+    }
+    void PlayDirectSound(std::uint32_t sound, TSPlayer receiver) const
+    {
+        if (_playerApiImpl && _unit)
+            _playerApiImpl->PlayDirectSound(_unit, sound, receiver.GetNativeHandle());
+    }
+    bool AddItem(std::uint32_t item, std::uint32_t count) const
+    {
+        return _playerApiImpl && _unit && _playerApiImpl->AddItem(_unit, item, count);
+    }
+    void AreaExploredOrEventHappens(std::uint32_t quest) const
+    {
+        if (_playerApiImpl && _unit)
+            _playerApiImpl->AreaExploredOrEventHappens(_unit, quest);
+    }
+    void LearnSpell(std::uint32_t spell) const
+    {
+        if (_playerApiImpl && _unit)
+            _playerApiImpl->LearnSpell(_unit, spell);
     }
 
 private:
@@ -779,7 +834,11 @@ private:
     using name##Callback = std::function<void(__VA_ARGS__)>; \
     TSMappedEvent<name##Callback> name##Callbacks; \
     void name(name##Callback callback) { name##Callbacks.Add(std::move(callback)); } \
-    void name(std::uint32_t id, name##Callback callback) { name##Callbacks.Add(id, std::move(callback)); }
+    void name(std::uint32_t id, name##Callback callback) { name##Callbacks.Add(id, std::move(callback)); } \
+    void name(TSArray<std::uint32_t> const& ids, name##Callback callback) { \
+        for (std::size_t index = 0; index < ids.get_length(); ++index) \
+            name##Callbacks.Add(ids[static_cast<int>(index)], callback); \
+    }
 
 struct TSEvents
 {
