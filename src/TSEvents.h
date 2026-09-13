@@ -120,6 +120,7 @@ public:
     bool IsAnyTypeGameObject() const { return IsGameObject() || IsTransport() || IsMOTransport(); }
     bool IsInstance() const { return High() == 0x1F40; }
     bool IsGroup() const { return High() == 0x1F50; }
+    std::uint64_t GetRawValue() const { return _guid; }
     std::string stringify(int = 0) const { return std::to_string(_guid); }
 
 private:
@@ -155,6 +156,7 @@ inline TSGUID EmptyGUID()
 class TSPlayer;
 class TSBattleground;
 class TSBattlegroundScore;
+template <typename T> class TSTimer;
 struct TSBattlegroundApi;
 struct TSBattlegroundScoreApi;
 struct TSPlayerApi;
@@ -166,6 +168,56 @@ struct TSPacketReadApi
     std::string (*ReadString)(void*, std::string const&);
     std::uint32_t (*Size)(void*);
     void (*Reset)(void*);
+};
+
+struct TSObjectStateApi
+{
+    std::shared_ptr<void> (*GetObject)(void*, std::string const&,
+        std::function<std::shared_ptr<void>()> const&);
+    std::shared_ptr<void> (*SetObject)(void*, std::string const&, std::shared_ptr<void>);
+    bool (*HasObject)(void*, std::string const&);
+};
+
+enum class TimerFlags : std::uint32_t
+{
+    CLEARS_ON_DEATH = 0x1,
+    CLEARS_ON_MAP_CHANGED = 0x2,
+    AGGREGATE_LOOPS = 0x4
+};
+
+enum class TimerLoops : std::int32_t { ONCE = 1, INDEFINITE = -1 };
+
+struct TSTimerApi
+{
+    void (*Stop)(void*);
+    std::uint32_t (*GetDelay)(void*);
+    void (*SetDelay)(void*, std::uint32_t);
+    std::uint64_t (*GetDiff)(void*);
+    std::uint32_t (*GetFlags)(void*);
+    void (*SetFlags)(void*, std::uint32_t);
+    std::int32_t (*GetRepeats)(void*);
+    void (*SetRepeats)(void*, std::int32_t);
+    std::string (*GetName)(void*);
+};
+
+template <typename T>
+class TSTimer
+{
+public:
+    TSTimer(void* timer = nullptr, TSTimerApi const* api = nullptr) : _timer(timer), _api(api) { }
+    TSTimer* operator->() { return this; }
+    void Stop() { if (_api && _timer) _api->Stop(_timer); }
+    TSNumber<std::uint32_t> GetDelay() { return _api && _timer ? _api->GetDelay(_timer) : 0; }
+    void SetDelay(std::uint32_t value) { if (_api && _timer) _api->SetDelay(_timer, value); }
+    TSNumber<std::uint64_t> GetDiff() { return _api && _timer ? static_cast<double>(_api->GetDiff(_timer)) : 0; }
+    TSNumber<std::uint32_t> GetFlags() { return _api && _timer ? _api->GetFlags(_timer) : 0; }
+    void SetFlags(std::uint32_t value) { if (_api && _timer) _api->SetFlags(_timer, value); }
+    TSNumber<std::int32_t> GetRepeats() { return _api && _timer ? _api->GetRepeats(_timer) : 0; }
+    void SetRepeats(std::int32_t value) { if (_api && _timer) _api->SetRepeats(_timer, value); }
+    std::string GetName() { return _api && _timer ? _api->GetName(_timer) : ""; }
+private:
+    void* _timer;
+    TSTimerApi const* _api;
 };
 
 class TSPacketRead
@@ -218,6 +270,12 @@ struct TSMapApi
     void* (*GetBattleground)(void*);
     TSBattlegroundApi const* BattlegroundApi;
     TSBattlegroundScoreApi const* BattlegroundScoreApi;
+    TSObjectStateApi const* ObjectStateApi;
+    void (*AddTimer)(void*, char const*, std::uint32_t, std::int32_t, std::uint32_t,
+        std::function<void(void*, void*)>);
+    void (*RemoveTimer)(void*, char const*);
+    void (*DoDelayed)(void*, std::function<void(void*)>);
+    TSTimerApi const* TimerApi;
 };
 
 class TSMap
@@ -230,6 +288,61 @@ public:
     void* GetNativeHandle() const { return _map; }
     bool IsBG() const { return _api && _map && _api->IsBG(_map); }
     TSBattleground ToBG() const;
+    TSArray<TSPlayer> GetPlayers() const;
+    template <typename T>
+    std::shared_ptr<T> GetObject(std::string const& key,
+        std::function<std::shared_ptr<T>()> defaultValue = nullptr) const
+    {
+        if (!_api || !_api->ObjectStateApi || !_map)
+            return nullptr;
+        std::function<std::shared_ptr<void>()> factory;
+        if (defaultValue)
+            factory = [defaultValue]() { return std::static_pointer_cast<void>(defaultValue()); };
+        return std::static_pointer_cast<T>(_api->ObjectStateApi->GetObject(_map, key, factory));
+    }
+    template <typename T>
+    std::shared_ptr<T> SetObject(std::string const& key, std::shared_ptr<T> value) const
+    {
+        return std::static_pointer_cast<T>(_api->ObjectStateApi->SetObject(
+            _map, key, std::static_pointer_cast<void>(value)));
+    }
+    bool HasObject(std::string const& key) const
+    {
+        return _api && _api->ObjectStateApi && _map && _api->ObjectStateApi->HasObject(_map, key);
+    }
+    void AddNamedTimer(std::string const& name, std::uint32_t time, std::int32_t loops,
+        std::uint32_t flags, std::function<void(TSMap, TSTimer<TSMap>*)> callback) const
+    {
+        if (!_api || !_api->AddTimer || !_map) return;
+        TSMap owner = *this;
+        TSTimerApi const* timerApi = _api->TimerApi;
+        _api->AddTimer(_map, name.c_str(), time, loops, flags,
+            [owner, timerApi, callback = std::move(callback)](void*, void* timer) mutable
+            { TSTimer<TSMap> wrapped(timer, timerApi); callback(owner, &wrapped); });
+    }
+    void AddNamedTimer(std::string const& name, std::uint32_t time, std::int32_t loops,
+        std::function<void(TSMap, TSTimer<TSMap>*)> callback) const
+    { AddNamedTimer(name, time, loops, 0, std::move(callback)); }
+    void AddNamedTimer(std::string const& name, std::uint32_t time,
+        std::function<void(TSMap, TSTimer<TSMap>*)> callback) const
+    { AddNamedTimer(name, time, 1, 0, std::move(callback)); }
+    void AddTimer(std::uint32_t time, std::int32_t loops, std::uint32_t flags,
+        std::function<void(TSMap, TSTimer<TSMap>*)> callback) const
+    { AddNamedTimer("", time, loops, flags, std::move(callback)); }
+    void AddTimer(std::uint32_t time, std::int32_t loops,
+        std::function<void(TSMap, TSTimer<TSMap>*)> callback) const
+    { AddNamedTimer("", time, loops, 0, std::move(callback)); }
+    void AddTimer(std::uint32_t time, std::function<void(TSMap, TSTimer<TSMap>*)> callback) const
+    { AddNamedTimer("", time, 1, 0, std::move(callback)); }
+    void RemoveTimer(std::string const& name) const
+    { if (_api && _api->RemoveTimer && _map) _api->RemoveTimer(_map, name.c_str()); }
+    void DoDelayed(std::function<void(TSMap, TSMainThreadContext)> callback) const
+    {
+        if (!_api || !_api->DoDelayed || !_map) return;
+        TSMap owner = *this;
+        _api->DoDelayed(_map, [owner, callback = std::move(callback)](void*) mutable
+            { callback(owner, TSMainThreadContext()); });
+    }
     void* __this;
 
 protected:
@@ -401,6 +514,8 @@ struct TSUnitApi
     void (*Respawn)(void*);
     void (*RemoveCorpse)(void*);
     TSMapApi const* MapApi;
+    TSObjectStateApi const* ObjectStateApi;
+    void (*ApplyPlayerOutfit)(void*, void*);
 };
 
 struct TSPlayerApi
@@ -453,12 +568,55 @@ public:
     {
         return TSMap(_api && _unit ? _api->GetMap(_unit) : nullptr, _api ? _api->MapApi : nullptr);
     }
+    template <typename T>
+    std::shared_ptr<T> GetObject(std::string const& key,
+        std::function<std::shared_ptr<T>()> defaultValue = nullptr) const
+    {
+        if (!_api || !_api->ObjectStateApi || !_unit)
+            return nullptr;
+        std::function<std::shared_ptr<void>()> factory;
+        if (defaultValue)
+            factory = [defaultValue]() { return std::static_pointer_cast<void>(defaultValue()); };
+        return std::static_pointer_cast<T>(_api->ObjectStateApi->GetObject(_unit, key, factory));
+    }
+    template <typename T>
+    std::shared_ptr<T> SetObject(std::string const& key, std::shared_ptr<T> value) const
+    {
+        return std::static_pointer_cast<T>(_api->ObjectStateApi->SetObject(
+            _unit, key, std::static_pointer_cast<void>(value)));
+    }
+    bool HasObject(std::string const& key) const
+    {
+        return _api && _api->ObjectStateApi && _unit && _api->ObjectStateApi->HasObject(_unit, key);
+    }
     void* __this;
 
 protected:
     void* _unit;
     TSUnitApi const* _api;
     TSPlayerApi const* _playerApi;
+};
+
+enum Outfit : std::uint32_t
+{
+    SOUND_ID = 0x1, GUILD = 0x2, CLASS = 0x4, HEAD = 0x8, SHOULDERS = 0x10,
+    BODY = 0x20, CHEST = 0x40, WAIST = 0x80, LEGS = 0x100, FEET = 0x200,
+    WRISTS = 0x400, HANDS = 0x800, BACK = 0x1000, MAINHAND = 0x2000,
+    OFFHAND = 0x4000, RANGED = 0x8000, WEAPONS = MAINHAND | OFFHAND | RANGED,
+    ARMOR = HEAD | SHOULDERS | BODY | CHEST | WAIST | LEGS | FEET | WRISTS | HANDS | BACK,
+    GEAR = WEAPONS | ARMOR, EVERYTHING = GEAR | SOUND_ID | GUILD | CLASS
+};
+
+class TSOutfit
+{
+public:
+    explicit TSOutfit(void* player = nullptr) : _player(player) { }
+    TSOutfit* operator->() { return this; }
+    explicit operator bool() const { return _player != nullptr; }
+    bool IsNull() const { return _player == nullptr; }
+    void* GetPlayerHandle() const { return _player; }
+private:
+    void* _player;
 };
 
 class TSCreature : public TSUnit
@@ -476,6 +634,11 @@ public:
     {
         if (_api && _unit)
             _api->RemoveCorpse(_unit);
+    }
+    void SetOutfit(TSOutfit const& outfit) const
+    {
+        if (_api && _api->ApplyPlayerOutfit && _unit && outfit)
+            _api->ApplyPlayerOutfit(_unit, outfit.GetPlayerHandle());
     }
 };
 
@@ -501,6 +664,8 @@ public:
     {
         return _playerApiImpl && _unit ? _playerApiImpl->GetTeam(_unit) : 2;
     }
+    TSOutfit GetOutfitCopy(std::uint32_t = Outfit::EVERYTHING, std::int32_t = -1,
+        std::int32_t = -1) const { return TSOutfit(_unit); }
     void GossipMenuAddItem(std::uint32_t icon, std::string const& message, std::uint32_t sender = 0,
         std::uint32_t action = 0, bool code = false, std::string const& prompt = "",
         std::uint32_t money = 0) const
@@ -603,6 +768,11 @@ inline TSArray<TSPlayer> TSBattleground::GetPlayers() const
             players.push(TSPlayer(player, _battlegroundApi->PlayerApi, _battlegroundApi->UnitApi));
     }
     return players;
+}
+
+inline TSArray<TSPlayer> TSMap::GetPlayers() const
+{
+    return ToBG().GetPlayers();
 }
 
 class TSPacketWrite
@@ -1952,6 +2122,10 @@ struct TSEvents
         std::vector<OnReceiveCallback> _all;
         std::unordered_map<std::uint32_t, std::vector<OnReceiveCallback>> _byId;
     } CustomPacket;
+
+    // Appended to preserve offsets used by livescripts built against an older
+    // event table. The concrete ABI lives in the public database header.
+    void const* DatabaseApi = nullptr;
 
     void Clear()
     {

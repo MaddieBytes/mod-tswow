@@ -2,5 +2,6 @@
 
 install(FILES
   "${CMAKE_CURRENT_SOURCE_DIR}/src/TSAll.h"
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/TSDatabase.h"
   "${CMAKE_CURRENT_SOURCE_DIR}/src/TSEvents.h"
   DESTINATION include)

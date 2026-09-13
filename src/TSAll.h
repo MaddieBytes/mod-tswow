@@ -2,6 +2,7 @@
 #define MOD_TSWOW_ALL_H
 
 #include "TSEvents.h"
+#include "TSDatabase.h"
 
 #include <cstdint>
 #include <cmath>

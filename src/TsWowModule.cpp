@@ -29,6 +29,7 @@
 #include "Map.h"
 #include "MapMgr.h"
 #include "Mail.h"
+#include "MySQLConnection.h"
 #include "MotionMaster.h"
 #include "ObjectAccessor.h"
 #include "Player.h"
@@ -38,7 +39,7 @@
 #include "Spell.h"
 #include "SpellMgr.h"
 #include "SpellAuras.h"
-#include "TSEvents.h"
+#include "TSAll.h"
 #include "Trainer.h"
 #include "TSLuaRuntime.h"
 #include "TypeContainerVisitor.h"
@@ -47,6 +48,8 @@
 #include "WorldPacket.h"
 #include "WorldSession.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <array>
 #include <filesystem>
@@ -54,6 +57,7 @@
 #include <map>
 #include <memory>
 #include <set>
+#include <stdexcept>
 #include <unordered_map>
 
 #if PLATFORM == PLATFORM_WINDOWS
@@ -74,6 +78,414 @@ std::map<std::filesystem::path, LibraryHandle> Libraries;
 std::unordered_map<void*, std::unordered_map<std::string, std::uint32_t>> BattlegroundScoreAttributes;
 std::unordered_map<std::uint32_t, std::uint32_t> PermanentTalentQuestRewards;
 std::unordered_map<std::uint64_t, std::array<std::uint32_t, MAX_STATS>> PlayerLevelStats;
+std::unordered_map<void*, std::unordered_map<std::string, std::shared_ptr<void>>> NativeObjectState;
+
+struct NativeTimer
+{
+    void* Owner = nullptr;
+    std::string Name;
+    std::uint32_t Delay = 1;
+    std::int64_t Remaining = 1;
+    std::uint64_t Diff = 0;
+    std::int32_t Repeats = 1;
+    std::uint32_t Flags = 0;
+    bool Stopped = false;
+    std::function<void(void*, void*)> Callback;
+};
+
+std::vector<std::shared_ptr<NativeTimer>> NativeTimers;
+std::unordered_map<void*, std::vector<std::function<void(void*)>>> NativeDelayedCallbacks;
+
+TSTimerApi const NativeTimerApi{
+    [](void* timer) { static_cast<NativeTimer*>(timer)->Stopped = true; },
+    [](void* timer) { return static_cast<NativeTimer*>(timer)->Delay; },
+    [](void* timer, std::uint32_t value) { static_cast<NativeTimer*>(timer)->Delay = std::max(1u, value); },
+    [](void* timer) { return static_cast<NativeTimer*>(timer)->Diff; },
+    [](void* timer) { return static_cast<NativeTimer*>(timer)->Flags; },
+    [](void* timer, std::uint32_t value) { static_cast<NativeTimer*>(timer)->Flags = value; },
+    [](void* timer) { return static_cast<NativeTimer*>(timer)->Repeats; },
+    [](void* timer, std::int32_t value) { static_cast<NativeTimer*>(timer)->Repeats = value; },
+    [](void* timer) { return static_cast<NativeTimer*>(timer)->Name; }
+};
+
+void AddNativeTimer(void* owner, char const* name, std::uint32_t delay, std::int32_t repeats,
+    std::uint32_t flags, std::function<void(void*, void*)> callback)
+{
+    if (name && *name)
+        for (auto const& timer : NativeTimers)
+            if (timer->Owner == owner && timer->Name == name)
+                timer->Stopped = true;
+    auto timer = std::make_shared<NativeTimer>();
+    timer->Owner = owner;
+    timer->Name = name ? name : "";
+    timer->Delay = std::max(1u, delay);
+    timer->Remaining = timer->Delay;
+    timer->Repeats = repeats;
+    timer->Flags = flags;
+    timer->Callback = std::move(callback);
+    NativeTimers.push_back(std::move(timer));
+}
+
+void RemoveNativeTimer(void* owner, char const* name)
+{
+    for (auto const& timer : NativeTimers)
+        if (timer->Owner == owner && timer->Name == name)
+            timer->Stopped = true;
+}
+
+void AddNativeDelayedCallback(void* owner, std::function<void(void*)> callback)
+{
+    NativeDelayedCallbacks[owner].push_back(std::move(callback));
+}
+
+void UpdateNativeTimers(void* owner, std::uint32_t diff)
+{
+    std::size_t const count = NativeTimers.size();
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        auto timer = NativeTimers[index];
+        if (timer->Stopped || timer->Owner != owner)
+            continue;
+        timer->Remaining -= diff;
+        while (!timer->Stopped && timer->Remaining <= 0)
+        {
+            timer->Diff = static_cast<std::uint64_t>(timer->Delay - timer->Remaining);
+            timer->Callback(owner, timer.get());
+            timer->Diff = 0;
+            if (timer->Repeats > 0 && --timer->Repeats == 0)
+                timer->Stopped = true;
+            timer->Remaining += timer->Delay;
+            if (!(timer->Flags & static_cast<std::uint32_t>(TimerFlags::AGGREGATE_LOOPS)))
+                break;
+        }
+    }
+    NativeTimers.erase(std::remove_if(NativeTimers.begin(), NativeTimers.end(),
+        [](auto const& timer) { return timer->Stopped; }), NativeTimers.end());
+}
+
+void RunNativeDelayedCallbacks(void* owner)
+{
+    auto found = NativeDelayedCallbacks.find(owner);
+    if (found == NativeDelayedCallbacks.end()) return;
+    auto callbacks = std::move(found->second);
+    NativeDelayedCallbacks.erase(found);
+    for (auto& callback : callbacks) callback(owner);
+}
+
+std::shared_ptr<void> GetNativeObjectState(void* owner, std::string const& key,
+    std::function<std::shared_ptr<void>()> const& factory)
+{
+    auto& values = NativeObjectState[owner];
+    auto found = values.find(key);
+    if (found != values.end())
+        return found->second;
+    if (!factory)
+        return nullptr;
+    return values.emplace(key, factory()).first->second;
+}
+
+std::shared_ptr<void> SetNativeObjectState(void* owner, std::string const& key, std::shared_ptr<void> value)
+{
+    NativeObjectState[owner][key] = std::move(value);
+    return NativeObjectState[owner][key];
+}
+
+bool HasNativeObjectState(void* owner, std::string const& key)
+{
+    auto values = NativeObjectState.find(owner);
+    return values != NativeObjectState.end() && values->second.find(key) != values->second.end();
+}
+
+TSObjectStateApi const ObjectStateApi{
+    GetNativeObjectState,
+    SetNativeObjectState,
+    HasNativeObjectState
+};
+
+void ClearNativeObjectState(void* owner)
+{
+    NativeObjectState.erase(owner);
+    NativeDelayedCallbacks.erase(owner);
+    for (auto const& timer : NativeTimers)
+        if (timer->Owner == owner)
+            timer->Stopped = true;
+}
+
+struct NativeDatabaseResult
+{
+    explicit NativeDatabaseResult(QueryResult value) : result(std::move(value)) { }
+    QueryResult result;
+    Field* fields = nullptr;
+};
+
+QueryResult DatabaseQuery(std::uint8_t database, std::string const& sql)
+{
+    switch (static_cast<TSDatabaseType>(database))
+    {
+        case TSDatabaseType::WORLD: return WorldDatabase.Query(sql);
+        case TSDatabaseType::AUTH: return LoginDatabase.Query(sql);
+        case TSDatabaseType::CHARACTERS: return CharacterDatabase.Query(sql);
+    }
+    throw std::out_of_range("TSWoW database type");
+}
+
+void* QueryDatabase(std::uint8_t database, char const* sql)
+{
+    return new NativeDatabaseResult(DatabaseQuery(database, sql));
+}
+
+void QueryDatabaseAsync(std::uint8_t database, char const* sql)
+{
+    switch (static_cast<TSDatabaseType>(database))
+    {
+        case TSDatabaseType::WORLD: WorldDatabase.Execute(sql); return;
+        case TSDatabaseType::AUTH: LoginDatabase.Execute(sql); return;
+        case TSDatabaseType::CHARACTERS: CharacterDatabase.Execute(sql); return;
+    }
+    throw std::out_of_range("TSWoW database type");
+}
+
+NativeDatabaseResult const* AsDatabaseResult(void const* value)
+{
+    return static_cast<NativeDatabaseResult const*>(value);
+}
+
+bool DatabaseResultIsValid(void const* value)
+{
+    return value && AsDatabaseResult(value)->result != nullptr;
+}
+
+bool DatabaseResultGetRow(void* value)
+{
+    auto* result = static_cast<NativeDatabaseResult*>(value);
+    if (!result || !result->result)
+        return false;
+    if (!result->fields)
+    {
+        result->fields = result->result->Fetch();
+        return true;
+    }
+    if (!result->result->NextRow())
+        return false;
+    result->fields = result->result->Fetch();
+    return true;
+}
+
+Field const& DatabaseField(void const* value, std::uint32_t index)
+{
+    auto const* result = AsDatabaseResult(value);
+    if (!result || !result->fields)
+        throw std::runtime_error("TSWoW database field read before GetRow");
+    return result->fields[index];
+}
+
+std::uint64_t DatabaseResultGetUInt(void const* value, std::uint32_t index, std::uint8_t width)
+{
+    Field const& field = DatabaseField(value, index);
+    switch (width)
+    {
+        case 1: return field.Get<std::uint8_t>();
+        case 2: return field.Get<std::uint16_t>();
+        case 4: return field.Get<std::uint32_t>();
+        case 8: return field.Get<std::uint64_t>();
+        default: throw std::out_of_range("TSWoW unsigned database field width");
+    }
+}
+
+std::int64_t DatabaseResultGetInt(void const* value, std::uint32_t index, std::uint8_t width)
+{
+    Field const& field = DatabaseField(value, index);
+    switch (width)
+    {
+        case 1: return field.Get<std::int8_t>();
+        case 2: return field.Get<std::int16_t>();
+        case 4: return field.Get<std::int32_t>();
+        case 8: return field.Get<std::int64_t>();
+        default: throw std::out_of_range("TSWoW signed database field width");
+    }
+}
+
+double DatabaseResultGetDouble(void const* value, std::uint32_t index, bool singlePrecision)
+{
+    return singlePrecision ? DatabaseField(value, index).Get<float>() : DatabaseField(value, index).Get<double>();
+}
+
+std::string DatabaseResultGetString(void const* value, std::uint32_t index)
+{
+    return DatabaseField(value, index).Get<std::string>();
+}
+
+std::vector<std::uint8_t> DatabaseResultGetBinary(void const* value, std::uint32_t index)
+{
+    return DatabaseField(value, index).Get<Binary>();
+}
+
+std::string EscapeDatabaseString(std::uint8_t database, std::string const& input)
+{
+    std::string value = input;
+    switch (static_cast<TSDatabaseType>(database))
+    {
+        case TSDatabaseType::WORLD: WorldDatabase.EscapeString(value); break;
+        case TSDatabaseType::AUTH: LoginDatabase.EscapeString(value); break;
+        case TSDatabaseType::CHARACTERS: CharacterDatabase.EscapeString(value); break;
+        default: throw std::out_of_range("TSWoW database type");
+    }
+    return value;
+}
+
+MySQLConnectionInfo const* DatabaseInfo(std::uint8_t database)
+{
+    switch (static_cast<TSDatabaseType>(database))
+    {
+        case TSDatabaseType::WORLD: return WorldDatabase.GetConnectionInfo();
+        case TSDatabaseType::AUTH: return LoginDatabase.GetConnectionInfo();
+        case TSDatabaseType::CHARACTERS: return CharacterDatabase.GetConnectionInfo();
+    }
+    throw std::out_of_range("TSWoW database type");
+}
+
+std::string DatabaseConnectionInfo(std::uint8_t database, std::uint8_t field)
+{
+    MySQLConnectionInfo const* info = DatabaseInfo(database);
+    switch (field)
+    {
+        case 0: return info->user;
+        case 1: return info->password;
+        case 2: return info->database;
+        case 3: return info->host;
+        case 4: return info->port_or_socket;
+        case 5: return info->ssl;
+        default: throw std::out_of_range("TSWoW database info field");
+    }
+}
+
+std::string QuoteIdentifier(std::string value)
+{
+    std::size_t position = 0;
+    while ((position = value.find('`', position)) != std::string::npos)
+    {
+        value.insert(position, 1, '`');
+        position += 2;
+    }
+    return "`" + value + "`";
+}
+
+std::string Lowercase(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(),
+        [](unsigned char character) { return static_cast<char>(std::tolower(character)); });
+    return value;
+}
+
+void CreateDatabaseTable(std::uint8_t database, std::string const& databaseName,
+    std::string const& tableName, std::vector<FieldSpec> const& fields)
+{
+    std::string sql = "CREATE TABLE " + QuoteIdentifier(databaseName) + "." + QuoteIdentifier(tableName) + " (";
+    bool hasPrimaryKey = false;
+    for (std::size_t index = 0; index < fields.size(); ++index)
+    {
+        FieldSpec const& field = fields[index];
+        if (index) sql += ",";
+        sql += QuoteIdentifier(field.m_name) + " " + field.m_typeName;
+        if (field.m_autoIncrements) sql += " AUTO_INCREMENT";
+        hasPrimaryKey = hasPrimaryKey || field.m_isPrimaryKey;
+    }
+    if (hasPrimaryKey)
+    {
+        sql += ", PRIMARY KEY (";
+        bool first = true;
+        for (FieldSpec const& field : fields)
+            if (field.m_isPrimaryKey)
+            {
+                if (!first) sql += ",";
+                sql += QuoteIdentifier(field.m_name);
+                first = false;
+            }
+        sql += ")";
+    }
+    DatabaseQuery(database, sql + ");");
+}
+
+void CreateNativeDatabaseSpec(std::uint8_t database, std::string const& databaseName,
+    std::string const& tableName, std::vector<FieldSpec> const& fields)
+{
+    std::string escapedDatabase = EscapeDatabaseString(database, databaseName);
+    std::string escapedTable = EscapeDatabaseString(database, tableName);
+    QueryResult exists = DatabaseQuery(database,
+        "SELECT COUNT(*) FROM `information_schema`.`TABLES` WHERE `TABLE_SCHEMA`='" + escapedDatabase +
+        "' AND `TABLE_NAME`='" + escapedTable + "'");
+    if (!exists || exists->Fetch()[0].Get<std::uint32_t>() == 0)
+    {
+        CreateDatabaseTable(database, databaseName, tableName, fields);
+        return;
+    }
+
+    std::vector<FieldSpec> oldFields;
+    QueryResult columns = DatabaseQuery(database,
+        "SELECT `COLUMN_NAME`,`COLUMN_TYPE`,`COLUMN_KEY`,`EXTRA` FROM `information_schema`.`COLUMNS` "
+        "WHERE `TABLE_SCHEMA`='" + escapedDatabase + "' AND `TABLE_NAME`='" + escapedTable +
+        "' ORDER BY `ORDINAL_POSITION`");
+    if (columns)
+        do
+        {
+            Field* row = columns->Fetch();
+            oldFields.push_back({ Lowercase(row[0].Get<std::string>()), Lowercase(row[1].Get<std::string>()),
+                Lowercase(row[2].Get<std::string>()) == "pri",
+                Lowercase(row[3].Get<std::string>()).find("auto_increment") != std::string::npos });
+        } while (columns->NextRow());
+
+    auto primaryKeys = [](std::vector<FieldSpec> const& values)
+    {
+        std::vector<std::pair<std::string, std::string>> result;
+        for (FieldSpec const& field : values)
+            if (field.m_isPrimaryKey)
+                result.emplace_back(Lowercase(field.m_name), Lowercase(field.m_typeName) +
+                    (field.m_autoIncrements ? " auto_increment" : ""));
+        return result;
+    };
+    if (primaryKeys(oldFields) != primaryKeys(fields))
+    {
+        DatabaseQuery(database, "DROP TABLE " + QuoteIdentifier(databaseName) + "." + QuoteIdentifier(tableName));
+        CreateDatabaseTable(database, databaseName, tableName, fields);
+        return;
+    }
+
+    std::string qualified = QuoteIdentifier(databaseName) + "." + QuoteIdentifier(tableName);
+    for (FieldSpec const& oldField : oldFields)
+    {
+        auto current = std::find_if(fields.begin(), fields.end(), [&](FieldSpec const& field)
+            { return Lowercase(field.m_name) == oldField.m_name; });
+        if (current == fields.end())
+            DatabaseQuery(database, "ALTER TABLE " + qualified + " DROP COLUMN " + QuoteIdentifier(oldField.m_name));
+        else if (Lowercase(current->m_typeName) != oldField.m_typeName)
+            DatabaseQuery(database, "ALTER TABLE " + qualified + " MODIFY COLUMN " + QuoteIdentifier(current->m_name) +
+                " " + current->m_typeName);
+    }
+    for (FieldSpec const& field : fields)
+    {
+        auto old = std::find_if(oldFields.begin(), oldFields.end(), [&](FieldSpec const& value)
+            { return value.m_name == Lowercase(field.m_name); });
+        if (old == oldFields.end())
+            DatabaseQuery(database, "ALTER TABLE " + qualified + " ADD COLUMN " + QuoteIdentifier(field.m_name) +
+                " " + field.m_typeName);
+    }
+}
+
+TSDatabaseApi const NativeDatabaseApi{
+    QueryDatabase,
+    QueryDatabaseAsync,
+    [](void* result) { delete static_cast<NativeDatabaseResult*>(result); },
+    DatabaseResultIsValid,
+    DatabaseResultGetRow,
+    DatabaseResultGetUInt,
+    DatabaseResultGetInt,
+    DatabaseResultGetDouble,
+    DatabaseResultGetString,
+    DatabaseResultGetBinary,
+    EscapeDatabaseString,
+    DatabaseConnectionInfo,
+    CreateNativeDatabaseSpec
+};
 
 std::uint64_t PlayerLevelStatKey(std::uint8_t race, std::uint8_t playerClass, std::uint8_t level)
 {
@@ -402,6 +814,21 @@ void RemoveCreatureCorpse(void* creature)
     static_cast<Creature*>(creature)->RemoveCorpse();
 }
 
+void ApplyPlayerOutfit(void* creatureHandle, void* playerHandle)
+{
+    Creature* creature = static_cast<Creature*>(creatureHandle);
+    Player* player = static_cast<Player*>(playerHandle);
+    if (!creature || !player)
+        return;
+
+    // The stock mirror-image handler asks global modules for effective item
+    // displays, so mod-transmog appearances are included automatically.
+    player->AddAura(45204, creature);
+    creature->SetVirtualItem(0, player->GetUInt32Value(PLAYER_VISIBLE_ITEM_16_ENTRYID));
+    creature->SetVirtualItem(1, player->GetUInt32Value(PLAYER_VISIBLE_ITEM_17_ENTRYID));
+    creature->SetVirtualItem(2, player->GetUInt32Value(PLAYER_VISIBLE_ITEM_18_ENTRYID));
+}
+
 void UpdateBattlegroundWorldState(void* battleground, std::uint32_t variable, std::uint32_t value)
 {
     static_cast<Battleground*>(battleground)->UpdateWorldState(variable, value);
@@ -514,6 +941,11 @@ TSMapApi const MapApi = {
     &GetMapBattleground,
     &BattlegroundApi,
     &BattlegroundScoreApi,
+    &ObjectStateApi,
+    &AddNativeTimer,
+    &RemoveNativeTimer,
+    &AddNativeDelayedCallback,
+    &NativeTimerApi,
 };
 
 TSPlayerApi const PlayerApi = {
@@ -557,6 +989,8 @@ TSUnitApi const UnitApi = {
     &RespawnCreature,
     &RemoveCreatureCorpse,
     &MapApi,
+    &ObjectStateApi,
+    &ApplyPlayerOutfit,
 };
 
 TSPlayer WrapPlayer(Player* player)
@@ -733,6 +1167,9 @@ void CloseLibrary(LibraryHandle library)
 void UnloadLivescripts()
 {
     ts_events.Clear();
+    NativeObjectState.clear();
+    NativeTimers.clear();
+    NativeDelayedCallbacks.clear();
     // Lua callbacks own references into the Lua state, so callbacks must be
     // cleared before the state is destroyed.
     UnloadLuaLivescripts();
@@ -1343,6 +1780,7 @@ public:
                 WrapBattleground(battleground), WrapPlayer(player));
         ts_events.Player.OnLogoutCallbacks.Fire(WrapPlayer(player));
         ClearLuaEntityState(player);
+        ClearNativeObjectState(player);
         CustomPacketBuffers.erase(player->GetGUID().GetRawValue());
     }
     void OnPlayerCreate(Player* player) override
@@ -1941,6 +2379,7 @@ public:
         ts_events.Creature.OnRemoveCallbacks.Fire(entry, wrapped);
         if (Map* map = creature->GetMap())
             ts_events.Map.OnCreatureRemoveCallbacks.Fire(map->GetId(), TSMap(map, &MapApi), wrapped);
+        ClearNativeObjectState(creature);
     }
 };
 
@@ -2060,6 +2499,7 @@ public:
         ts_events.GameObject.OnRemoveCallbacks.Fire(entry, wrapped);
         if (Map* map = gameObject->GetMap())
             ts_events.Map.OnGameObjectRemoveCallbacks.Fire(map->GetId(), TSMap(map, &MapApi), wrapped);
+        ClearNativeObjectState(gameObject);
     }
 };
 
@@ -2254,16 +2694,19 @@ public:
     void OnDestroyMap(Map* map) override
     {
         ClearLuaEntityState(map);
+        ClearNativeObjectState(map);
     }
 
     void OnMapUpdate(Map* map, uint32 diff) override
     {
+        UpdateNativeTimers(map, diff);
         std::uint32_t const mapId = map->GetId();
         ts_events.Map.OnUpdateCallbacks.Fire(mapId, TSMap(map, &MapApi), diff);
     }
 
     void OnMapDelayedUpdate(Map* map, uint32 diff) override
     {
+        RunNativeDelayedCallbacks(map);
         std::uint32_t const mapId = map->GetId();
         ts_events.Map.OnUpdateDelayedCallbacks.Fire(mapId, TSMap(map, &MapApi), diff, TSMainThreadContext());
     }
@@ -2907,6 +3350,7 @@ TSEvents ts_events;
 
 void Addmod_tswowScripts()
 {
+    ts_events.DatabaseApi = &NativeDatabaseApi;
     ts_events.Player.OnReloadHandler = ReloadPlayers;
     ts_events.Creature.OnReloadHandler = ReloadCreatures;
     ts_events.GameObject.OnReloadHandler = ReloadGameObjects;
