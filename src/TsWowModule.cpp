@@ -39,6 +39,7 @@
 #include "SpellAuras.h"
 #include "TSEvents.h"
 #include "Trainer.h"
+#include "TSLuaRuntime.h"
 #include "TypeContainerVisitor.h"
 #include "Vehicle.h"
 #include "Weather.h"
@@ -596,6 +597,9 @@ void CloseLibrary(LibraryHandle library)
 void UnloadLivescripts()
 {
     ts_events.Clear();
+    // Lua callbacks own references into the Lua state, so callbacks must be
+    // cleared before the state is destroyed.
+    UnloadLuaLivescripts();
     CustomPacketBuffers.clear();
     BattlegroundScoreAttributes.clear();
     for (auto const& [path, library] : Libraries)
@@ -639,6 +643,11 @@ void LoadLivescripts()
         addScripts(&ts_events);
         LOG_INFO("tswow.livescripts", "Loaded {}", path.string());
     }
+
+    std::filesystem::path const luaDirectory =
+        sConfigMgr->GetOption<std::string>("TSWoW.LuaDir", "./lib/lua");
+    if (!LoadLuaLivescripts(luaDirectory))
+        UnloadLivescripts();
 }
 
 class TsWowWorldScript final : public WorldScript
@@ -664,6 +673,9 @@ public:
     void OnShutdownCancel() override { ts_events.World.OnShutdownCancelCallbacks.Fire(); }
     void OnUpdate(uint32 diff) override
     {
+        if (LuaLivescriptsNeedReload())
+            LoadLivescripts();
+        UpdateLuaLivescripts(diff);
         ts_events.World.OnUpdateCallbacks.Fire(diff, TSMainThreadContext());
     }
     void OnStartup() override
@@ -2073,6 +2085,11 @@ public:
     {
         std::uint32_t const mapId = map->GetId();
         ts_events.Map.OnCreateCallbacks.Fire(mapId, TSMap(map, &MapApi));
+    }
+
+    void OnDestroyMap(Map* map) override
+    {
+        ClearLuaEntityState(map);
     }
 
     void OnMapUpdate(Map* map, uint32 diff) override

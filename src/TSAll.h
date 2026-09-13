@@ -65,6 +65,9 @@ private:
     std::mutex _lock;
 };
 
+#ifdef CreateMutex
+#undef CreateMutex
+#endif
 #define CreateMutexLock TSMutex
 #define CreateMutex TSMutex
 

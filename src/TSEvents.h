@@ -225,6 +225,7 @@ public:
     TSMap* operator->() { return this; }
     explicit operator bool() const { return _map != nullptr; }
     bool IsNull() const { return _map == nullptr; }
+    void* GetNativeHandle() const { return _map; }
     bool IsBG() const { return _api && _map && _api->IsBG(_map); }
     TSBattleground ToBG() const;
 

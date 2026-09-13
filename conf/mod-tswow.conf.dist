@@ -2,3 +2,8 @@
 
 # Directory containing TSWoW livescript .dll or .so files.
 TSWoW.LivescriptDir = "./lib"
+
+# Directory containing TypeScript-to-Lua output. Keep this separate from
+# ALE.ScriptPath. The directory may contain lualib_bundle.lua and one or more
+# module directories with entry-point files.
+TSWoW.LuaDir = "./lib/lua"
