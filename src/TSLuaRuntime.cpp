@@ -50,7 +50,7 @@ bool LogLuaError(sol::protected_function_result const& result)
     if (result.valid())
         return true;
     sol::error error = result;
-    LOG_ERROR("tswow.lua", "{}", error.what());
+    LOG_ERROR("module.tswow.lua", "{}", error.what());
     return false;
 }
 
@@ -139,6 +139,13 @@ sol::object Require(std::string const& name)
     if (name == "lualib_bundle")
     {
         std::filesystem::path bundle = FindModule(name);
+        if (bundle.empty())
+        {
+            std::filesystem::path const sharedBundle =
+                LuaRoot.parent_path() / "lualib" / "lualib_bundle.lua";
+            if (std::filesystem::is_regular_file(sharedBundle))
+                bundle = Normalize(sharedBundle);
+        }
         if (bundle.empty())
             throw std::runtime_error("Could not find lualib_bundle.lua under " + LuaRoot.string());
         return ExecuteFile(bundle);
@@ -406,7 +413,7 @@ bool LoadLuaLivescripts(std::filesystem::path const& root)
         return true;
     if (!ALE::IsInitialized() || !sALE || !sALE->HasLuaState())
     {
-        LOG_ERROR("tswow.lua", "mod-ale has no active Lua state");
+        LOG_ERROR("module.tswow.lua", "mod-ale has no active Lua state");
         return false;
     }
 
@@ -417,13 +424,16 @@ bool LoadLuaLivescripts(std::filesystem::path const& root)
     try
     {
         BindGlobals(*Lua, *Environment);
-        sol::protected_function registerServerEvent = (*Lua)["RegisterServerEvent"];
-        if (!registerServerEvent.valid() || !LogLuaError(registerServerEvent(16, [](sol::variadic_args)
-            {
-                LOCK_ALE;
-                ts_events.Clear();
-                DetachFromAle(true);
-            })))
+        Environment->set_function("__TSWOW_STATE_CLOSE", []()
+        {
+            LOCK_ALE;
+            ts_events.Clear();
+            DetachFromAle(true);
+        });
+        sol::protected_function_result stateCloseRegistration = Lua->safe_script(
+            "RegisterServerEvent(16, function(...) __TSWOW_STATE_CLOSE() end)",
+            *Environment, sol::script_pass_on_error);
+        if (!LogLuaError(stateCloseRegistration))
             throw std::runtime_error("Could not register the mod-ale state-close callback");
 
         for (auto const& entry : std::filesystem::recursive_directory_iterator(LuaRoot))
@@ -444,18 +454,18 @@ bool LoadLuaLivescripts(std::filesystem::path const& root)
                     throw std::runtime_error("Lua Main failed in " + path.string());
             sol::object inlineMain = value.as<sol::table>()["__InlineMain"];
             if (inlineMain.get_type() == sol::type::function)
-                if (!LogLuaError(inlineMain.as<sol::protected_function>()()))
+                if (!LogLuaError(inlineMain.as<sol::protected_function>()(&ts_events)))
                     throw std::runtime_error("Lua __InlineMain failed in " + path.string());
         }
     }
     catch (std::exception const& error)
     {
-        LOG_ERROR("tswow.lua", "Lua livescript load failed: {}", error.what());
+        LOG_ERROR("module.tswow.lua", "Lua livescript load failed: {}", error.what());
         return false;
     }
 
     ReloadRequested = false;
-    LOG_INFO("tswow.lua", "Loaded Lua livescripts from {}", LuaRoot.string());
+    LOG_INFO("module.tswow.lua", "Loaded Lua livescripts from {}", LuaRoot.string());
     return true;
 }
 

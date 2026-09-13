@@ -21,6 +21,7 @@
 #include "Log.h"
 #include "Creature.h"
 #include "DBCStructure.h"
+#include "DatabaseEnv.h"
 #include "GameObject.h"
 #include "GridDefines.h"
 #include "Item.h"
@@ -47,6 +48,7 @@
 #include "WorldSession.h"
 
 #include <cstring>
+#include <array>
 #include <filesystem>
 #include <iterator>
 #include <map>
@@ -70,6 +72,85 @@ using AddTsScripts = void (*)(TSEvents*);
 
 std::map<std::filesystem::path, LibraryHandle> Libraries;
 std::unordered_map<void*, std::unordered_map<std::string, std::uint32_t>> BattlegroundScoreAttributes;
+std::unordered_map<std::uint32_t, std::uint32_t> PermanentTalentQuestRewards;
+std::unordered_map<std::uint64_t, std::array<std::uint32_t, MAX_STATS>> PlayerLevelStats;
+
+std::uint64_t PlayerLevelStatKey(std::uint8_t race, std::uint8_t playerClass, std::uint8_t level)
+{
+    return std::uint64_t(race) | (std::uint64_t(playerClass) << 8) | (std::uint64_t(level) << 16);
+}
+
+void LoadPlayerLevelStats()
+{
+    PlayerLevelStats.clear();
+    QueryResult result = WorldDatabase.Query(
+        "SELECT `race`, `class`, `level`, `str`, `agi`, `sta`, `inte`, `spi` "
+        "FROM `player_levelstats`");
+    if (!result)
+        return;
+
+    do
+    {
+        Field* fields = result->Fetch();
+        PlayerLevelStats.emplace(
+            PlayerLevelStatKey(fields[0].Get<uint8>(), fields[1].Get<uint8>(), fields[2].Get<uint8>()),
+            std::array<std::uint32_t, MAX_STATS>{
+                fields[3].Get<uint32>(), fields[4].Get<uint32>(), fields[5].Get<uint32>(),
+                fields[6].Get<uint32>(), fields[7].Get<uint32>()});
+    } while (result->NextRow());
+}
+
+void ApplyPlayerLevelStats(Player* player)
+{
+    auto const itr = PlayerLevelStats.find(
+        PlayerLevelStatKey(player->getRace(), player->getClass(), player->GetLevel()));
+    if (itr == PlayerLevelStats.end())
+        return;
+
+    for (std::uint8_t stat = 0; stat < MAX_STATS; ++stat)
+        player->SetCreateStat(Stats(stat), itr->second[stat]);
+    player->UpdateAllStats();
+}
+
+void LoadPermanentTalentQuestRewards()
+{
+    PermanentTalentQuestRewards.clear();
+    QueryResult result = WorldDatabase.Query(
+        "SELECT `ID`, `RewardTalentsPermanent` FROM `quest_template` "
+        "WHERE `RewardTalentsPermanent` > 0");
+    if (!result)
+        return;
+
+    do
+    {
+        Field* fields = result->Fetch();
+        PermanentTalentQuestRewards.emplace(fields[0].Get<uint32>(), fields[1].Get<uint32>());
+    } while (result->NextRow());
+}
+
+void ApplyTsWowBattlegroundDoors(Battleground* battleground, bool opening)
+{
+    BattlegroundMap* map = battleground->FindBgMap();
+    if (!map)
+        return;
+
+    QueryResult result = WorldDatabase.Query(
+        "SELECT `entry`, `type` FROM `battleground_door_object` WHERE `map` = {}",
+        battleground->GetMapId());
+    if (!result)
+        return;
+
+    do
+    {
+        Field* fields = result->Fetch();
+        uint32 const entry = fields[0].Get<uint32>();
+        uint8 const type = fields[1].Get<uint8>();
+        bool const active = opening ? type == 0 : type != 0;
+        for (auto const& object : map->GetGameObjectBySpawnIdStore())
+            if (object.second->GetEntry() == entry)
+                object.second->SetGoState(active ? GO_STATE_ACTIVE : GO_STATE_READY);
+    } while (result->NextRow());
+}
 
 std::uint64_t GetPlayerGuid(void* player)
 {
@@ -535,7 +616,7 @@ void ReloadBattlegrounds(TSEvents::BattlegroundEvents::OnReloadCallback const& c
 
 TSBattleground WrapBattleground(Battleground* battleground)
 {
-    return TSBattleground(battleground, battleground ? battleground->GetBgMap() : nullptr, &MapApi,
+    return TSBattleground(battleground, battleground ? battleground->FindBgMap() : nullptr, &MapApi,
         &BattlegroundApi, &BattlegroundScoreApi);
 }
 
@@ -605,7 +686,7 @@ void UnloadLivescripts()
     for (auto const& [path, library] : Libraries)
     {
         CloseLibrary(library);
-        LOG_INFO("tswow.livescripts", "Unloaded {}", path.string());
+        LOG_INFO("module.tswow.livescripts", "Unloaded {}", path.string());
     }
     Libraries.clear();
 }
@@ -627,21 +708,21 @@ void LoadLivescripts()
         LibraryHandle library = OpenLibrary(path);
         if (!library)
         {
-            LOG_ERROR("tswow.livescripts", "Could not load {}", path.string());
+            LOG_ERROR("module.tswow.livescripts", "Could not load {}", path.string());
             continue;
         }
 
         auto addScripts = reinterpret_cast<AddTsScripts>(FindSymbol(library, "AddTSScripts"));
         if (!addScripts)
         {
-            LOG_ERROR("tswow.livescripts", "{} does not export AddTSScripts", path.string());
+            LOG_ERROR("module.tswow.livescripts", "{} does not export AddTSScripts", path.string());
             CloseLibrary(library);
             continue;
         }
 
         Libraries.emplace(path, library);
         addScripts(&ts_events);
-        LOG_INFO("tswow.livescripts", "Loaded {}", path.string());
+        LOG_INFO("module.tswow.livescripts", "Loaded {}", path.string());
     }
 
     std::filesystem::path const luaDirectory =
@@ -660,7 +741,11 @@ public:
     {
         ts_events.World.OnConfigLoadCallbacks.Fire(reload);
         if (reload)
+        {
+            LoadPermanentTalentQuestRewards();
+            LoadPlayerLevelStats();
             LoadLivescripts();
+        }
     }
     void OnMotdChange(std::string& motd, LocaleConstant&) override
     {
@@ -680,6 +765,8 @@ public:
     }
     void OnStartup() override
     {
+        LoadPermanentTalentQuestRewards();
+        LoadPlayerLevelStats();
         LoadLivescripts();
         ts_events.World.OnStartupCallbacks.Fire();
     }
@@ -915,6 +1002,7 @@ public:
 
     void OnPlayerLevelChanged(Player* player, uint8 oldLevel) override
     {
+        ApplyPlayerLevelStats(player);
         ts_events.Player.OnLevelChangedCallbacks.Fire(WrapPlayer(player), oldLevel);
     }
     void OnPlayerPVPKill(Player* killer, Player* killed) override
@@ -1187,6 +1275,7 @@ public:
     }
     void OnPlayerLogin(Player* player) override
     {
+        ApplyPlayerLevelStats(player);
         ts_events.Player.OnLoginCallbacks.Fire(WrapPlayer(player), player->HasAtLoginFlag(AT_LOGIN_FIRST));
         if (Battleground* battleground = player->GetBattleground())
             ts_events.Battleground.OnPlayerLoginCallbacks.Fire(battleground->GetMapId(),
@@ -1201,7 +1290,11 @@ public:
         ClearLuaEntityState(player);
         CustomPacketBuffers.erase(player->GetGUID().GetRawValue());
     }
-    void OnPlayerCreate(Player* player) override { ts_events.Player.OnCreateCallbacks.Fire(WrapPlayer(player)); }
+    void OnPlayerCreate(Player* player) override
+    {
+        ApplyPlayerLevelStats(player);
+        ts_events.Player.OnCreateCallbacks.Fire(WrapPlayer(player));
+    }
     void OnPlayerDelete(ObjectGuid guid, uint32 accountId) override
     {
         ts_events.Player.OnDeleteCallbacks.Fire(guid.GetRawValue(), accountId);
@@ -1233,8 +1326,16 @@ public:
     }
     void OnPlayerCalculateTalentsPoints(Player const* player, uint32& points) override
     {
+        for (auto const& [questId, reward] : PermanentTalentQuestRewards)
+            if (player->GetQuestRewardStatus(questId))
+                points += reward;
         ts_events.Player.OnCalcTalentPointsCallbacks.Fire(WrapPlayer(const_cast<Player*>(player)),
             TSMutableNumber<uint32>(&points));
+    }
+    void OnPlayerCompleteQuest(Player* player, Quest const* quest) override
+    {
+        if (PermanentTalentQuestRewards.find(quest->GetQuestId()) != PermanentTalentQuestRewards.end())
+            player->InitTalentForLevel();
     }
     void OnPlayerQuestComputeXP(Player* player, Quest const* quest, uint32& xpValue) override
     {
@@ -1481,6 +1582,13 @@ public:
 
     bool OnTryExecuteCommand(ChatHandler& handler, std::string_view commandText) override
     {
+        if (commandText == "reload livescripts")
+        {
+            LoadLivescripts();
+            handler.SendSysMessage("TSWoW livescripts reloaded.");
+            return false;
+        }
+
         Player* player = handler.GetPlayer();
         if (!player)
             return true;
@@ -1492,7 +1600,7 @@ public:
 
         if (!found && command != commandText)
         {
-            LOG_ERROR("tswow.livescripts", "A livescript changed command '{}' to '{}', but AzerothCore's "
+            LOG_ERROR("module.tswow.livescripts", "A livescript changed command '{}' to '{}', but AzerothCore's "
                 "command hook cannot replace parser input", commandText, command);
             return false;
         }
@@ -2590,6 +2698,7 @@ public:
                     secondaryValue, flag, TSMutableNumber<std::uint32_t>(value));
                 break;
             case BattlegroundLifecycleEvent::CloseDoors:
+                ApplyTsWowBattlegroundDoors(battleground, false);
                 ts_events.Battleground.OnCloseDoorsCallbacks.Fire(mapId, wrapped);
                 break;
             case BattlegroundLifecycleEvent::PlayerUnderMap:
@@ -2717,6 +2826,7 @@ public:
     void OnBattlegroundStart(Battleground* battleground) override
     {
         std::uint32_t const mapId = battleground->GetMapId();
+        ApplyTsWowBattlegroundDoors(battleground, true);
         ts_events.Battleground.OnOpenDoorsCallbacks.Fire(mapId, WrapBattleground(battleground));
     }
 

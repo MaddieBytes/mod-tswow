@@ -10,9 +10,9 @@ event semantics. Add a generic core hook only when neither an existing AzerothCo
 maintained module exposes the required timing or mutable decision. Do not carry forward a
 Trinity-era implementation when AzerothCore already supplies the feature.
 
-Set `TSWoW.LivescriptDir` in `worldserver.conf` to the directory containing compiled
+Set `TSWoW.LivescriptDir` in `configs/modules/mod-tswow.conf` to the directory containing compiled
 TSWoW livescript libraries. It defaults to `./lib`.
-Set `TSWoW.LuaDir` to the TypeScript-to-Lua output root when using the Lua backend. It
+Set `TSWoW.LuaDir` there to the TypeScript-to-Lua output root when using the Lua backend. It
 defaults to `./lib/lua`.
 
 Configure from the workspace root like any other static AzerothCore module:
@@ -66,14 +66,14 @@ module. Per-player receive buffers are module-owned and cleared on logout and li
 `Battleground.OnOpenDoors` currently forwards from AzerothCore's `OnBattlegroundStart`, which runs
 later in the same start transition after doors open. Exact before/after ordering remains a parity item.
 
-Windows validation currently covers a static AzerothCore worldserver build, an offline load of the complete
+Windows validation currently covers a static AzerothCore worldserver build, an isolated seven-second server startup,
+native and Lua probe loading, live unload/reload, clean shutdown, and an offline load of the complete
 resolved `tswow-tests` Lua entry point, focused plain/prepared/async SQL and generated ORM checks, a fragmented
 packet-runtime round trip with callback read-head reset, and an isolated full
 livescript chain: TypeScript transpilation, C++ DLL compilation without core libraries, DLL loading,
 `AddTSScripts` registration, custom-packet registration, typed packet reads and writes, callback cleanup,
 addon-message dispatch, quest-reward talent calculation, persistent functional-event object capture, mutex and
-array use, player teleportation, mutable/cancellable battleground score output, and unload. No port server is
-started during build validation. The generated smoke also covers battleground map conversion, player and
+array use, player teleportation, mutable/cancellable battleground score output, and unload. The generated smoke also covers battleground map conversion, player and
 score lookup, team-aware honor rewards, world-state updates, match completion, and creature death cleanup.
 It also compiles mutation callbacks for resistance, armor, attack power, avoidance, hit, expertise, mana,
 and rune regeneration through the public TypeScript API.
@@ -85,6 +85,9 @@ module-owned storage and are removed when the battleground is destroyed.
 
 | TSWoW capability | AzerothCore interface | Where | Timing and behavior | Reasoning |
 | --- | --- | --- | --- | --- |
+| Realm runtime configuration | AzerothCore config tree and built-in database updater | [`Realm.ts`](https://github.com/MaddieBytes/tswow/blob/azerothcore-port/tswow-scripts/runtime/Realm.ts) and `configs/modules/mod-tswow.conf` | Stages core and module configs into each realm, points both livescript backends at the dataset output, and applies pinned core/module SQL updates before world loading. | Uses AzerothCore's maintained configuration and update paths instead of duplicating its schema migration logic. |
+| Player level stats and permanent quest talents | Existing player lifecycle and talent-calculation hooks plus module-owned caches | [`src/TsWowModule.cpp`](src/TsWowModule.cpp) and [`data/sql/db-world/base/tswow_gameplay_extensions.sql`](data/sql/db-world/base/tswow_gameplay_extensions.sql) | Loads generated compatibility rows at startup/config reload, applies race/class/level create stats on create, login, and level change, and adds permanent quest rewards during talent-point calculation. | AzerothCore's normalized class/race tables cannot represent every TSWoW row directly; small module caches preserve the public behavior without changing core player classes. |
+| Datascript schema compatibility | SQL views, compatibility columns, normalized-table adapters, and module tables | [`data/sql/db-world/base`](data/sql/db-world/base), [`AzerothCoreAdapters.ts`](https://github.com/MaddieBytes/tswow/blob/azerothcore-port/tswow-scripts/data/sql/AzerothCoreAdapters.ts), and [`src/TsWowModule.cpp`](src/TsWowModule.cpp) | Preserves existing datascript table shapes, writes normalized creature models/immunities and player stats, and reads battleground doors and gameplay extensions through module-owned tables. Unsupported lossy mappings fail explicitly. | Keeps the TypeScript data API stable while letting AzerothCore retain its native normalized schema. |
 | Lua livescript runtime | ALE's public Lua state, recursive lock, state-close event, plus existing world and map hooks | [`src/TSLuaRuntime.cpp`](src/TSLuaRuntime.cpp), [`src/TsWowModule.cpp`](src/TsWowModule.cpp), and [`mod-tswow.cmake`](mod-tswow.cmake) | Loads TSTL modules into a private environment after native libraries, registers protected callbacks, advances TSWoW timers during world updates, clears map state on destruction, and releases all TSWoW Lua references before ALE closes its state. | ALE remains the single Lua runtime and retains its normal module behavior. `mod-tswow` adds only the compatibility layer whose event shapes ALE does not expose. No AzerothCore or ALE source patch is needed. |
 | Lua SQL and ORM | ALE `WorldDBQuery`, `CharDBQuery`, `AuthDBQuery`, and matching execute globals | [`src/TSLuaDatabase.cpp`](src/TSLuaDatabase.cpp) and [`LuaORM.ts`](https://github.com/MaddieBytes/tswow/blob/azerothcore-port/tswow-scripts/addons/LuaORM.ts) | Adapts TSWoW's GetRow-first result API, parameterized prepared-query builder, async sends, decorators, table creation, entry loading, dirty tracking, deletion, and container saves. New array rows obtain an explicit `UUID_SHORT()` index before their normal prepared save. | ALE already formats and escapes runtime parameters and owns database execution. Explicit row IDs remove the old connection-pinned `LAST_INSERT_ID()` sequence, so no database-pool accessor or AzerothCore patch is needed. Binary fields, SQL NULL parameters, database credential inspection, schema migration, and real database execution remain explicit runtime acceptance items. |
 | Custom client packet receive | Existing `ServerScript::CanPacketReceive` | [`src/TsWowModule.cpp`](src/TsWowModule.cpp) | Runs before opcode dispatch. The module consumes only opcode `0x51F` packets with a structurally valid TSWoW fragment header and returns `false`; all other packets continue normally. | AzerothCore already exposes the required cancellable packet event. Header validation preserves TC9 redirect traffic that shares the opcode, so no core hook is needed. |

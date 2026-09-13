@@ -1,0 +1,6 @@
+CREATE TABLE IF NOT EXISTS `battleground_door_object` (
+  `entry` MEDIUMINT UNSIGNED NOT NULL,
+  `map` MEDIUMINT UNSIGNED NOT NULL,
+  `type` TINYINT UNSIGNED NOT NULL,
+  PRIMARY KEY (`entry`, `map`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
