@@ -4,6 +4,12 @@ This module is the AzerothCore host for TSWoW. The first working slice keeps the
 `AddTSScripts(TSEvents*)` ABI and forwards AzerothCore world lifecycle hooks directly to
 the existing TSWoW event registry.
 
+For each subsystem, use AzerothCore core behavior and maintained AzerothCore modules first.
+`mod-tswow` should provide only the adapter required to preserve TSWoW's public API or exact
+event semantics. Add a generic core hook only when neither an existing AzerothCore hook nor a
+maintained module exposes the required timing or mutable decision. Do not carry forward a
+Trinity-era implementation when AzerothCore already supplies the feature.
+
 Set `TSWoW.LivescriptDir` in `worldserver.conf` to the directory containing compiled
 TSWoW livescript libraries. It defaults to `./lib`.
 Set `TSWoW.LuaDir` to the TypeScript-to-Lua output root when using the Lua backend. It
