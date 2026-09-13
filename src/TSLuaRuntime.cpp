@@ -25,20 +25,72 @@ std::filesystem::path LuaRoot;
 std::vector<std::filesystem::path> FileStack;
 std::map<std::filesystem::path, sol::object> Modules;
 std::map<void*, std::map<std::string, sol::object>> EntityState;
+std::map<void*, std::vector<std::pair<TSMap, sol::protected_function>>> DelayedCallbacks;
 
 struct LuaTimer
 {
     TSMap Owner;
+    std::string Name;
     std::uint32_t Interval;
-    std::int64_t Remaining;
+    std::uint64_t Elapsed = 0;
+    std::uint64_t Diff = 0;
     std::int32_t Repeats;
+    std::uint32_t Flags = 0;
     bool Stopped = false;
     sol::protected_function Callback;
 
     void Stop() { Stopped = true; }
+    std::uint32_t GetDelay() const { return Interval; }
+    void SetDelay(std::uint32_t value) { Interval = std::max<std::uint32_t>(1, value); }
+    std::uint64_t GetDiff() const { return Diff; }
+    std::uint32_t GetFlags() const { return Flags; }
+    void SetFlags(std::uint32_t value) { Flags = value; }
+    std::int32_t GetRepeats() const { return Repeats; }
+    void SetRepeats(std::int32_t value) { Repeats = value; }
+    std::string GetName() const { return Name; }
 };
 
 std::vector<std::shared_ptr<LuaTimer>> Timers;
+
+sol::object GetLuaObject(void* owner, std::string const& key, sol::object defaultValue)
+{
+    auto& values = EntityState[owner];
+    auto found = values.find(key);
+    if (found != values.end())
+        return found->second;
+    return values.emplace(key, std::move(defaultValue)).first->second;
+}
+
+sol::object SetLuaObject(void* owner, std::string const& key, sol::object value)
+{
+    EntityState[owner][key] = std::move(value);
+    return EntityState[owner][key];
+}
+
+bool HasLuaObject(void* owner, std::string const& key)
+{
+    auto found = EntityState.find(owner);
+    return found != EntityState.end() && found->second.find(key) != found->second.end();
+}
+
+std::shared_ptr<LuaTimer> AddLuaTimer(TSMap const& owner, std::string name, double interval,
+    double repeats, std::uint32_t flags, sol::protected_function callback)
+{
+    if (!name.empty())
+        for (std::shared_ptr<LuaTimer> const& timer : Timers)
+            if (timer->Owner.GetNativeHandle() == owner.GetNativeHandle() && timer->Name == name)
+                timer->Stopped = true;
+
+    auto timer = std::make_shared<LuaTimer>();
+    timer->Owner = owner;
+    timer->Name = std::move(name);
+    timer->Interval = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(interval));
+    timer->Repeats = static_cast<std::int32_t>(repeats);
+    timer->Flags = flags;
+    timer->Callback = std::move(callback);
+    Timers.push_back(timer);
+    return timer;
+}
 
 std::filesystem::path Normalize(std::filesystem::path const& path)
 {
@@ -193,22 +245,131 @@ void BindObjects(sol::state_view& lua, sol::environment& environment)
         "IsCreature", &TSGUID::IsCreature, "IsGameObject", &TSGUID::IsGameObject,
         "stringify", [](TSGUID const& guid) { return guid.stringify(); });
 
+    lua.new_usertype<TSOutfit>("TSOutfit", sol::no_constructor,
+        "IsNull", &TSOutfit::IsNull,
+        "SetClass", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetClass(static_cast<std::uint8_t>(value)); },
+        "GetClass", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetClass()); },
+        "SetFace", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetFace(static_cast<std::uint8_t>(value)); },
+        "GetFace", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetFace()); },
+        "SetSkin", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetSkin(static_cast<std::uint8_t>(value)); },
+        "GetSkin", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetSkin()); },
+        "SetHairStyle", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetHairStyle(static_cast<std::uint8_t>(value)); },
+        "GetHairStyle", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetHairStyle()); },
+        "SetFacialStyle", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetFacialStyle(static_cast<std::uint8_t>(value)); },
+        "GetFacialStyle", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetFacialStyle()); },
+        "SetHairColor", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetHairColor(static_cast<std::uint8_t>(value)); },
+        "GetHairColor", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetHairColor()); },
+        "SetSoundID", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetSoundID(static_cast<std::uint32_t>(value)); },
+        "GetSoundID", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetSoundID()); },
+        "SetGuild", sol::overload(
+            [](TSOutfit& outfit, TSGUID value) -> TSOutfit& { return outfit.SetGuild(value); },
+            [](TSOutfit& outfit, double value) -> TSOutfit&
+            { return outfit.SetGuild(TSNumber<std::uint32_t>(static_cast<std::uint32_t>(value))); }),
+        "GetGuildGUID", &TSOutfit::GetGuildGUID,
+        "GetGender", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetGender()); },
+        "GetRace", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetRace()); },
+        "GetDisplayID", sol::overload(
+            [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetDisplayID()); },
+            [](TSOutfit const& outfit, double slot)
+            { return static_cast<double>(outfit.GetDisplayID(static_cast<std::uint8_t>(slot))); }),
+        "SetDisplayID", [](TSOutfit& outfit, double value)
+        { outfit.SetDisplayID(static_cast<std::uint32_t>(value)); },
+        "SetItem", [](TSOutfit& outfit, double slot, double entry) -> TSOutfit&
+        { return outfit.SetItem(static_cast<std::uint8_t>(slot), static_cast<std::uint32_t>(entry)); },
+        "ClearItem", [](TSOutfit& outfit, double slot) -> TSOutfit&
+        { return outfit.ClearItem(static_cast<std::uint8_t>(slot)); },
+        "SetItemByDisplayID", [](TSOutfit& outfit, double slot, double display) -> TSOutfit&
+        { return outfit.SetItemByDisplayID(static_cast<std::uint8_t>(slot), static_cast<std::uint32_t>(display)); },
+        "SetMainhand", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetMainhand(static_cast<std::uint32_t>(value)); },
+        "SetOffhand", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetOffhand(static_cast<std::uint32_t>(value)); },
+        "SetRanged", [](TSOutfit& outfit, double value) -> TSOutfit&
+        { return outfit.SetRanged(static_cast<std::uint32_t>(value)); },
+        "ClearMainhand", &TSOutfit::ClearMainhand, "ClearOffhand", &TSOutfit::ClearOffhand,
+        "ClearRanged", &TSOutfit::ClearRanged,
+        "GetMainhand", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetMainhand()); },
+        "GetOffhand", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetOffhand()); },
+        "GetRanged", [](TSOutfit const& outfit) { return static_cast<double>(outfit.GetRanged()); },
+        "ApplyRef", &TSOutfit::ApplyRef,
+        "ApplyCopy", sol::overload(
+            [](TSOutfit& outfit, TSCreature creature) -> TSOutfit& { return outfit.ApplyCopy(creature); },
+            [](TSOutfit& outfit, TSCreature creature, double settings) -> TSOutfit&
+            { return outfit.ApplyCopy(creature, static_cast<std::uint32_t>(settings)); },
+            [](TSOutfit& outfit, TSCreature creature, double settings, double race) -> TSOutfit&
+            { return outfit.ApplyCopy(creature, static_cast<std::uint32_t>(settings),
+                static_cast<std::int32_t>(race)); },
+            [](TSOutfit& outfit, TSCreature creature, double settings, double race, double gender) -> TSOutfit&
+            { return outfit.ApplyCopy(creature, static_cast<std::uint32_t>(settings),
+                static_cast<std::int32_t>(race), static_cast<std::int32_t>(gender)); }));
+    environment.set_function("CreateOutfit", [](double race, double gender)
+    { return CreateOutfit(static_cast<std::uint32_t>(race), static_cast<std::uint32_t>(gender)); });
+
     lua.new_usertype<TSMap>("TSMap", sol::no_constructor,
         "IsNull", &TSMap::IsNull, "IsBG", &TSMap::IsBG, "ToBG", &TSMap::ToBG,
         "GetObject", [](TSMap const& map, std::string const& key, sol::object defaultValue)
+        { return GetLuaObject(map.GetNativeHandle(), key, std::move(defaultValue)); },
+        "SetObject", [](TSMap const& map, std::string const& key, sol::object value)
+        { return SetLuaObject(map.GetNativeHandle(), key, std::move(value)); },
+        "HasObject", [](TSMap const& map, std::string const& key)
+        { return HasLuaObject(map.GetNativeHandle(), key); },
+        "AddTimer", sol::overload(
+            [](TSMap const& map, double delay, sol::protected_function callback)
+            { return AddLuaTimer(map, "", delay, 1, 0, std::move(callback)); },
+            [](TSMap const& map, double delay, double repeats, sol::protected_function callback)
+            { return AddLuaTimer(map, "", delay, repeats, 0, std::move(callback)); },
+            [](TSMap const& map, double delay, double repeats, double flags, sol::protected_function callback)
+            { return AddLuaTimer(map, "", delay, repeats, static_cast<std::uint32_t>(flags), std::move(callback)); }),
+        "AddNamedTimer", sol::overload(
+            [](TSMap const& map, std::string const& name, double delay, sol::protected_function callback)
+            { return AddLuaTimer(map, name, delay, 1, 0, std::move(callback)); },
+            [](TSMap const& map, std::string const& name, double delay, double repeats,
+                sol::protected_function callback)
+            { return AddLuaTimer(map, name, delay, repeats, 0, std::move(callback)); },
+            [](TSMap const& map, std::string const& name, double delay, double repeats, double flags,
+                sol::protected_function callback)
+            { return AddLuaTimer(map, name, delay, repeats, static_cast<std::uint32_t>(flags),
+                std::move(callback)); }),
+        "RemoveTimer", [](TSMap const& map, std::string const& name)
         {
-            auto& values = EntityState[map.GetNativeHandle()];
-            auto found = values.find(key);
-            if (found != values.end())
-                return found->second;
-            return values.emplace(key, std::move(defaultValue)).first->second;
+            for (std::shared_ptr<LuaTimer> const& timer : Timers)
+                if (timer->Owner.GetNativeHandle() == map.GetNativeHandle() && timer->Name == name)
+                    timer->Stopped = true;
+        },
+        "DoDelayed", [](TSMap const& map, sol::protected_function callback)
+        {
+            DelayedCallbacks[map.GetNativeHandle()].emplace_back(map, std::move(callback));
         });
     lua.new_usertype<TSUnit>("TSUnit", sol::no_constructor,
         "IsNull", &TSUnit::IsNull, "IsPlayer", &TSUnit::IsPlayer, "ToPlayer", &TSUnit::ToPlayer,
         "GetEffectiveOwner", &TSUnit::GetEffectiveOwner, "GetGUIDLow", &TSUnit::GetGUIDLow,
-        "GetMapID", &TSUnit::GetMapID, "GetMap", &TSUnit::GetMap);
+        "GetMapID", &TSUnit::GetMapID, "GetMap", &TSUnit::GetMap,
+        "GetObject", [](TSUnit const& unit, std::string const& key, sol::object defaultValue)
+        { return GetLuaObject(unit.GetNativeHandle(), key, std::move(defaultValue)); },
+        "SetObject", [](TSUnit const& unit, std::string const& key, sol::object value)
+        { return SetLuaObject(unit.GetNativeHandle(), key, std::move(value)); },
+        "HasObject", [](TSUnit const& unit, std::string const& key)
+        { return HasLuaObject(unit.GetNativeHandle(), key); });
     lua.new_usertype<TSCreature>("TSCreature", sol::no_constructor, sol::base_classes, sol::bases<TSUnit>(),
-        "Respawn", &TSCreature::Respawn, "RemoveCorpse", &TSCreature::RemoveCorpse);
+        "Respawn", &TSCreature::Respawn, "RemoveCorpse", &TSCreature::RemoveCorpse,
+        "SetOutfit", &TSCreature::SetOutfit, "GetOutfit", &TSCreature::GetOutfit,
+        "GetOutfitCopy", sol::overload(
+            [](TSCreature const& creature) { return creature.GetOutfitCopy(); },
+            [](TSCreature const& creature, double settings)
+            { return creature.GetOutfitCopy(static_cast<std::uint32_t>(settings)); },
+            [](TSCreature const& creature, double settings, double race)
+            { return creature.GetOutfitCopy(static_cast<std::uint32_t>(settings),
+                static_cast<std::int32_t>(race)); },
+            [](TSCreature const& creature, double settings, double race, double gender)
+            { return creature.GetOutfitCopy(static_cast<std::uint32_t>(settings),
+                static_cast<std::int32_t>(race), static_cast<std::int32_t>(gender)); }));
     lua.new_usertype<TSPlayer>("TSPlayer", sol::no_constructor, sol::base_classes, sol::bases<TSUnit>(),
         "GetGUID", &TSPlayer::GetGUID, "SendBroadcastMessage", &TSPlayer::SendBroadcastMessage,
         "GetClass", &TSPlayer::GetClass, "GetMapID", &TSPlayer::GetMapID,
@@ -218,14 +379,21 @@ void BindObjects(sol::state_view& lua, sol::environment& environment)
         "GossipClearMenu", &TSPlayer::GossipClearMenu, "SetTaxiCheat", &TSPlayer::SetTaxiCheat,
         "SendUpdateWorldState", &TSPlayer::SendUpdateWorldState, "SendAddonMessage", &TSPlayer::SendAddonMessage,
         "Teleport", &TSPlayer::Teleport,
+        "GetOutfitCopy", sol::overload(
+            [](TSPlayer const& player) { return player.GetOutfitCopy(); },
+            [](TSPlayer const& player, double settings)
+            { return player.GetOutfitCopy(static_cast<std::uint32_t>(settings)); },
+            [](TSPlayer const& player, double settings, double race)
+            { return player.GetOutfitCopy(static_cast<std::uint32_t>(settings), static_cast<std::int32_t>(race)); },
+            [](TSPlayer const& player, double settings, double race, double gender)
+            { return player.GetOutfitCopy(static_cast<std::uint32_t>(settings), static_cast<std::int32_t>(race),
+                static_cast<std::int32_t>(gender)); }),
         "GetObject", [](TSPlayer const& player, std::string const& key, sol::object defaultValue)
-        {
-            auto& values = EntityState[player.GetNativeHandle()];
-            auto found = values.find(key);
-            if (found != values.end())
-                return found->second;
-            return values.emplace(key, std::move(defaultValue)).first->second;
-        });
+        { return GetLuaObject(player.GetNativeHandle(), key, std::move(defaultValue)); },
+        "SetObject", [](TSPlayer const& player, std::string const& key, sol::object value)
+        { return SetLuaObject(player.GetNativeHandle(), key, std::move(value)); },
+        "HasObject", [](TSPlayer const& player, std::string const& key)
+        { return HasLuaObject(player.GetNativeHandle(), key); });
     lua.new_usertype<TSSpell>("TSSpell", sol::no_constructor,
         "IsNull", &TSSpell::IsNull, "GetCaster", &TSSpell::GetCaster);
     lua.new_usertype<TSBattleground>("TSBattleground", sol::no_constructor, sol::base_classes, sol::bases<TSMap>(),
@@ -233,26 +401,19 @@ void BindObjects(sol::state_view& lua, sol::environment& environment)
         "RewardHonor", &TSBattleground::RewardHonor, "GetPlayers", &TSBattleground::GetPlayers,
         "GetScore", &TSBattleground::GetScore,
         "GetObject", [](TSBattleground const& map, std::string const& key, sol::object defaultValue)
-        {
-            auto& values = EntityState[map.GetNativeHandle()];
-            auto found = values.find(key);
-            if (found != values.end())
-                return found->second;
-            return values.emplace(key, std::move(defaultValue)).first->second;
-        },
+        { return GetLuaObject(map.GetNativeHandle(), key, std::move(defaultValue)); },
+        "SetObject", [](TSBattleground const& map, std::string const& key, sol::object value)
+        { return SetLuaObject(map.GetNativeHandle(), key, std::move(value)); },
+        "HasObject", [](TSBattleground const& map, std::string const& key)
+        { return HasLuaObject(map.GetNativeHandle(), key); },
         "AddTimer", [](TSBattleground const& owner, double interval, double repeats,
             sol::protected_function callback)
-        {
-            auto timer = std::make_shared<LuaTimer>();
-            timer->Owner = owner;
-            timer->Interval = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(interval));
-            timer->Remaining = timer->Interval;
-            timer->Repeats = static_cast<std::int32_t>(repeats);
-            timer->Callback = std::move(callback);
-            Timers.push_back(timer);
-            return timer;
-        });
-    lua.new_usertype<LuaTimer>("TSTimer", sol::no_constructor, "Stop", &LuaTimer::Stop);
+        { return AddLuaTimer(owner, "", interval, repeats, 0, std::move(callback)); });
+    lua.new_usertype<LuaTimer>("TSTimer", sol::no_constructor,
+        "Stop", &LuaTimer::Stop, "GetDelay", &LuaTimer::GetDelay, "SetDelay", &LuaTimer::SetDelay,
+        "GetDiff", &LuaTimer::GetDiff, "GetFlags", &LuaTimer::GetFlags, "SetFlags", &LuaTimer::SetFlags,
+        "GetRepeats", &LuaTimer::GetRepeats, "SetRepeats", &LuaTimer::SetRepeats,
+        "GetName", &LuaTimer::GetName);
     lua.new_usertype<TSBattlegroundScore>("TSBattlegroundScore", sol::no_constructor,
         "ApplyBaseToPacket", &TSBattlegroundScore::ApplyBaseToPacket,
         "GetCustomAttr", &TSBattlegroundScore::GetCustomAttr, "SetCustomAttr", &TSBattlegroundScore::SetCustomAttr,
@@ -395,6 +556,7 @@ void DetachFromAle(bool requestReload)
 {
     Timers.clear();
     EntityState.clear();
+    DelayedCallbacks.clear();
     Modules.clear();
     FileStack.clear();
     Environment.reset();
@@ -482,20 +644,30 @@ void UpdateLuaLivescripts(std::uint32_t diff)
         return;
     for (std::shared_ptr<LuaTimer> const& timer : Timers)
     {
-        if (timer->Stopped)
+        if (timer->Stopped || timer->Repeats == 0)
             continue;
-        timer->Remaining -= diff;
-        while (!timer->Stopped && timer->Remaining <= 0)
+
+        timer->Elapsed += diff;
+        if (timer->Elapsed < timer->Interval)
+            continue;
+
+        std::uint64_t loops = timer->Elapsed / timer->Interval;
+        if (timer->Repeats > 0)
+            loops = std::min<std::uint64_t>(loops, static_cast<std::uint64_t>(timer->Repeats));
+        std::uint64_t callbacks = (timer->Flags & static_cast<std::uint32_t>(TimerFlags::AGGREGATE_LOOPS))
+            ? loops : std::min<std::uint64_t>(1, loops);
+        timer->Diff = timer->Elapsed;
+        for (std::uint64_t loop = 0; loop < callbacks && !timer->Stopped; ++loop)
         {
             LogLuaError(timer->Callback(timer->Owner, timer));
-            if (timer->Repeats == 0)
-            {
+        }
+        timer->Diff = 0;
+        timer->Elapsed = 0;
+        if (timer->Repeats > 0)
+        {
+            timer->Repeats -= static_cast<std::int32_t>(loops);
+            if (timer->Repeats <= 0)
                 timer->Stopped = true;
-                break;
-            }
-            if (timer->Repeats > 0)
-                --timer->Repeats;
-            timer->Remaining += timer->Interval;
         }
     }
     Timers.erase(std::remove_if(Timers.begin(), Timers.end(),
@@ -506,9 +678,24 @@ void ClearLuaEntityState(void* owner)
 {
     LOCK_ALE;
     EntityState.erase(owner);
+    DelayedCallbacks.erase(owner);
     for (std::shared_ptr<LuaTimer> const& timer : Timers)
         if (timer->Owner.GetNativeHandle() == owner)
             timer->Stopped = true;
+}
+
+void RunLuaDelayedCallbacks(void* owner)
+{
+    LOCK_ALE;
+    if (!Lua)
+        return;
+    auto found = DelayedCallbacks.find(owner);
+    if (found == DelayedCallbacks.end())
+        return;
+    auto callbacks = std::move(found->second);
+    DelayedCallbacks.erase(found);
+    for (auto& [map, callback] : callbacks)
+        LogLuaError(callback(map, TSMainThreadContext()));
 }
 
 bool LuaLivescriptsNeedReload()

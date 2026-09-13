@@ -2531,6 +2531,7 @@ public:
         ts_events.Creature.OnRemoveCallbacks.Fire(entry, wrapped);
         if (Map* map = creature->GetMap())
             ts_events.Map.OnCreatureRemoveCallbacks.Fire(map->GetId(), TSMap(map, &MapApi), wrapped);
+        ClearLuaEntityState(creature);
         ClearNativeObjectState(creature);
         std::lock_guard<std::mutex> lock(NativeOutfitsMutex);
         NativeOutfits.erase(creature->GetGUID().GetRawValue());
@@ -2653,6 +2654,7 @@ public:
         ts_events.GameObject.OnRemoveCallbacks.Fire(entry, wrapped);
         if (Map* map = gameObject->GetMap())
             ts_events.Map.OnGameObjectRemoveCallbacks.Fire(map->GetId(), TSMap(map, &MapApi), wrapped);
+        ClearLuaEntityState(gameObject);
         ClearNativeObjectState(gameObject);
     }
 };
@@ -2860,6 +2862,7 @@ public:
 
     void OnMapDelayedUpdate(Map* map, uint32 diff) override
     {
+        RunLuaDelayedCallbacks(map);
         RunNativeDelayedCallbacks(map);
         std::uint32_t const mapId = map->GetId();
         ts_events.Map.OnUpdateDelayedCallbacks.Fire(mapId, TSMap(map, &MapApi), diff, TSMainThreadContext());
