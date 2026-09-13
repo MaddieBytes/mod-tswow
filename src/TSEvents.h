@@ -1,6 +1,7 @@
 #ifndef MOD_TSWOW_EVENTS_H
 #define MOD_TSWOW_EVENTS_H
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -154,6 +155,7 @@ inline TSGUID EmptyGUID()
 }
 
 class TSPlayer;
+class TSCreature;
 class TSBattleground;
 class TSBattlegroundScore;
 template <typename T> class TSTimer;
@@ -161,6 +163,8 @@ struct TSBattlegroundApi;
 struct TSBattlegroundScoreApi;
 struct TSPlayerApi;
 struct TSUnitApi;
+struct TSOutfitData;
+struct TSOutfitApi;
 
 struct TSPacketReadApi
 {
@@ -177,6 +181,40 @@ struct TSObjectStateApi
     std::shared_ptr<void> (*SetObject)(void*, std::string const&, std::shared_ptr<void>);
     bool (*HasObject)(void*, std::string const&);
 };
+
+struct TSOutfitData
+{
+    std::uint8_t Race = 1;
+    std::uint8_t Gender = 0;
+    std::uint8_t Class = 1;
+    std::uint8_t Skin = 0;
+    std::uint8_t Face = 0;
+    std::uint8_t HairStyle = 0;
+    std::uint8_t HairColor = 0;
+    std::uint8_t FacialStyle = 0;
+    std::uint32_t SoundId = 0;
+    std::uint64_t Guild = 0;
+    std::uint32_t DisplayId = 0;
+    std::array<std::uint32_t, 19> ItemDisplays{};
+    std::int32_t Mainhand = -1;
+    std::int32_t Offhand = -1;
+    std::int32_t Ranged = -1;
+};
+
+struct TSOutfitApi
+{
+    std::uint32_t (*ResolveDisplay)(std::uint8_t, std::uint8_t);
+    std::uint32_t (*ResolveItemDisplay)(std::uint32_t);
+    bool (*CopyPlayer)(void*, std::uint32_t, std::int32_t, std::int32_t, TSOutfitData*);
+    bool (*CopyCreature)(void*, std::uint32_t, std::int32_t, std::int32_t, TSOutfitData*);
+    void (*Apply)(void*, std::shared_ptr<TSOutfitData> const&);
+};
+
+inline TSOutfitApi const*& TSOutfitApiStorage()
+{
+    static TSOutfitApi const* api = nullptr;
+    return api;
+}
 
 enum class TimerFlags : std::uint32_t
 {
@@ -516,6 +554,7 @@ struct TSUnitApi
     TSMapApi const* MapApi;
     TSObjectStateApi const* ObjectStateApi;
     void (*ApplyPlayerOutfit)(void*, void*);
+    TSOutfitApi const* OutfitApi;
 };
 
 struct TSPlayerApi
@@ -610,14 +649,120 @@ enum Outfit : std::uint32_t
 class TSOutfit
 {
 public:
-    explicit TSOutfit(void* player = nullptr) : _player(player) { }
+    explicit TSOutfit(std::uint32_t race = 1, std::uint32_t gender = 0,
+        TSOutfitApi const* api = TSOutfitApiStorage()) :
+        _data(std::make_shared<TSOutfitData>()), _api(api)
+    {
+        _data->Race = static_cast<std::uint8_t>(race);
+        _data->Gender = static_cast<std::uint8_t>(gender);
+        if (_api && _api->ResolveDisplay)
+            _data->DisplayId = _api->ResolveDisplay(_data->Race, _data->Gender);
+    }
+    explicit TSOutfit(std::shared_ptr<TSOutfitData> data, TSOutfitApi const* api) :
+        _data(std::move(data)), _api(api) { }
     TSOutfit* operator->() { return this; }
-    explicit operator bool() const { return _player != nullptr; }
-    bool IsNull() const { return _player == nullptr; }
-    void* GetPlayerHandle() const { return _player; }
+    explicit operator bool() const { return _data != nullptr; }
+    bool operator==(TSOutfit const& other) const { return _data == other._data; }
+    bool IsNull() const { return !_data; }
+
+    TSOutfit& SetClass(std::uint8_t value) { _data->Class = value; return *this; }
+    TSNumber<std::uint8_t> GetClass() const { return _data ? _data->Class : 0; }
+    TSOutfit& SetFace(std::uint8_t value) { _data->Face = value; return *this; }
+    TSNumber<std::uint8_t> GetFace() const { return _data ? _data->Face : 0; }
+    TSOutfit& SetSkin(std::uint8_t value) { _data->Skin = value; return *this; }
+    TSNumber<std::uint8_t> GetSkin() const { return _data ? _data->Skin : 0; }
+    TSOutfit& SetHairStyle(std::uint8_t value) { _data->HairStyle = value; return *this; }
+    TSNumber<std::uint8_t> GetHairStyle() const { return _data ? _data->HairStyle : 0; }
+    TSOutfit& SetFacialStyle(std::uint8_t value) { _data->FacialStyle = value; return *this; }
+    TSNumber<std::uint8_t> GetFacialStyle() const { return _data ? _data->FacialStyle : 0; }
+    TSOutfit& SetHairColor(std::uint8_t value) { _data->HairColor = value; return *this; }
+    TSNumber<std::uint8_t> GetHairColor() const { return _data ? _data->HairColor : 0; }
+    TSOutfit& SetSoundID(std::uint32_t value) { _data->SoundId = value; return *this; }
+    TSNumber<std::uint32_t> GetSoundID() const { return _data ? _data->SoundId : 0; }
+    TSOutfit& SetGuild(TSGUID value) { _data->Guild = value.GetRawValue(); return *this; }
+    TSOutfit& SetGuild(TSNumber<std::uint32_t> value)
+    { _data->Guild = static_cast<std::uint32_t>(value); return *this; }
+    TSGUID GetGuildGUID() const { return TSGUID(_data ? _data->Guild : 0); }
+    TSNumber<std::uint8_t> GetGender() const { return _data ? _data->Gender : 0; }
+    TSNumber<std::uint8_t> GetRace() const { return _data ? _data->Race : 0; }
+    TSNumber<std::uint32_t> GetDisplayID() const { return _data ? _data->DisplayId : 0; }
+    void SetDisplayID(std::uint32_t value) { if (_data) _data->DisplayId = value; }
+
+    TSOutfit& SetItem(std::uint8_t slot, std::uint32_t entry)
+    {
+        if (slot == 15) return SetMainhand(entry);
+        if (slot == 16) return SetOffhand(entry);
+        if (slot == 17) return SetRanged(entry);
+        return SetItemByDisplayID(slot,
+            _api && _api->ResolveItemDisplay ? _api->ResolveItemDisplay(entry) : 0);
+    }
+    TSOutfit& ClearItem(std::uint8_t slot)
+    {
+        if (slot == 15) return ClearMainhand();
+        if (slot == 16) return ClearOffhand();
+        if (slot == 17) return ClearRanged();
+        return SetItemByDisplayID(slot, 0);
+    }
+    TSOutfit& SetItemByDisplayID(std::uint8_t slot, std::uint32_t display)
+    {
+        if (_data && slot < _data->ItemDisplays.size()) _data->ItemDisplays[slot] = display;
+        return *this;
+    }
+    TSNumber<std::uint32_t> GetDisplayID(std::uint8_t slot) const
+    { return _data && slot < _data->ItemDisplays.size() ? _data->ItemDisplays[slot] : 0; }
+    TSOutfit& SetMainhand(std::uint32_t value) { _data->Mainhand = value; return *this; }
+    TSOutfit& SetOffhand(std::uint32_t value) { _data->Offhand = value; return *this; }
+    TSOutfit& SetRanged(std::uint32_t value) { _data->Ranged = value; return *this; }
+    TSOutfit& ClearMainhand() { _data->Mainhand = -1; return *this; }
+    TSOutfit& ClearOffhand() { _data->Offhand = -1; return *this; }
+    TSOutfit& ClearRanged() { _data->Ranged = -1; return *this; }
+    TSNumber<std::int32_t> GetMainhand() const { return _data ? _data->Mainhand : -1; }
+    TSNumber<std::int32_t> GetOffhand() const { return _data ? _data->Offhand : -1; }
+    TSNumber<std::int32_t> GetRanged() const { return _data ? _data->Ranged : -1; }
+
+    TSOutfit& ApplyRef(TSCreature creature);
+    TSOutfit& ApplyCopy(TSCreature creature, std::uint32_t settings = Outfit::EVERYTHING,
+        std::int32_t race = -1, std::int32_t gender = -1);
+    TSOutfit Copy(std::uint32_t settings = Outfit::EVERYTHING, std::int32_t race = -1,
+        std::int32_t gender = -1) const
+    {
+        if (!_data) return TSOutfit(std::shared_ptr<TSOutfitData>(), _api);
+        auto value = std::make_shared<TSOutfitData>();
+        value->Race = race > 0 ? static_cast<std::uint8_t>(race) : _data->Race;
+        value->Gender = gender >= 0 ? static_cast<std::uint8_t>(gender) : _data->Gender;
+        value->DisplayId = (race > 0 || gender >= 0) && _api && _api->ResolveDisplay
+            ? _api->ResolveDisplay(value->Race, value->Gender) : _data->DisplayId;
+        if (race <= 0 && gender < 0)
+        {
+            value->Skin = _data->Skin; value->Face = _data->Face;
+            value->HairStyle = _data->HairStyle; value->HairColor = _data->HairColor;
+            value->FacialStyle = _data->FacialStyle;
+        }
+        if (settings & Outfit::CLASS) value->Class = _data->Class;
+        if (settings & Outfit::GUILD) value->Guild = _data->Guild;
+        if (settings & Outfit::SOUND_ID) value->SoundId = _data->SoundId;
+        static constexpr std::array<std::pair<std::uint32_t, std::uint8_t>, 13> slots{{
+            {Outfit::BACK, 14}, {Outfit::BODY, 3}, {Outfit::CHEST, 4}, {Outfit::FEET, 7},
+            {Outfit::HANDS, 9}, {Outfit::HEAD, 0}, {Outfit::LEGS, 6},
+            {Outfit::MAINHAND, 15}, {Outfit::OFFHAND, 16}, {Outfit::RANGED, 17},
+            {Outfit::SHOULDERS, 2}, {Outfit::WAIST, 5}, {Outfit::WRISTS, 8}
+        }};
+        for (auto const& slot : slots)
+            if (settings & slot.first) value->ItemDisplays[slot.second] = _data->ItemDisplays[slot.second];
+        if (settings & Outfit::MAINHAND) value->Mainhand = _data->Mainhand;
+        if (settings & Outfit::OFFHAND) value->Offhand = _data->Offhand;
+        if (settings & Outfit::RANGED) value->Ranged = _data->Ranged;
+        return TSOutfit(std::move(value), _api);
+    }
+    TSOutfitData const* GetData() const { return _data.get(); }
+    std::shared_ptr<TSOutfitData> const& GetSharedData() const { return _data; }
 private:
-    void* _player;
+    std::shared_ptr<TSOutfitData> _data;
+    TSOutfitApi const* _api;
 };
+
+inline TSOutfit CreateOutfit(std::uint32_t race, std::uint32_t gender)
+{ return TSOutfit(race, gender, TSOutfitApiStorage()); }
 
 class TSCreature : public TSUnit
 {
@@ -637,10 +782,31 @@ public:
     }
     void SetOutfit(TSOutfit const& outfit) const
     {
-        if (_api && _api->ApplyPlayerOutfit && _unit && outfit)
-            _api->ApplyPlayerOutfit(_unit, outfit.GetPlayerHandle());
+        if (_api && _api->OutfitApi && _api->OutfitApi->Apply && _unit && outfit)
+            _api->OutfitApi->Apply(_unit, outfit.GetSharedData());
+    }
+    TSOutfit GetOutfit() const
+    {
+        auto data = std::make_shared<TSOutfitData>();
+        if (!_api || !_api->OutfitApi || !_api->OutfitApi->CopyCreature || !_unit ||
+            !_api->OutfitApi->CopyCreature(_unit, Outfit::EVERYTHING, -1, -1, data.get()))
+            return TSOutfit(std::shared_ptr<TSOutfitData>(), _api ? _api->OutfitApi : nullptr);
+        return TSOutfit(std::move(data), _api->OutfitApi);
+    }
+    TSOutfit GetOutfitCopy(std::uint32_t settings = Outfit::EVERYTHING, std::int32_t race = -1,
+        std::int32_t gender = -1) const
+    {
+        TSOutfit value = GetOutfit();
+        return value.Copy(settings, race, gender);
     }
 };
+
+inline TSOutfit& TSOutfit::ApplyRef(TSCreature creature)
+{ creature.SetOutfit(*this); return *this; }
+
+inline TSOutfit& TSOutfit::ApplyCopy(TSCreature creature, std::uint32_t settings,
+    std::int32_t race, std::int32_t gender)
+{ creature.SetOutfit(Copy(settings, race, gender)); return *this; }
 
 class TSPlayer : public TSUnit
 {
@@ -664,8 +830,15 @@ public:
     {
         return _playerApiImpl && _unit ? _playerApiImpl->GetTeam(_unit) : 2;
     }
-    TSOutfit GetOutfitCopy(std::uint32_t = Outfit::EVERYTHING, std::int32_t = -1,
-        std::int32_t = -1) const { return TSOutfit(_unit); }
+    TSOutfit GetOutfitCopy(std::uint32_t settings = Outfit::EVERYTHING, std::int32_t race = -1,
+        std::int32_t gender = -1) const
+    {
+        auto data = std::make_shared<TSOutfitData>();
+        if (!_api || !_api->OutfitApi || !_api->OutfitApi->CopyPlayer || !_unit ||
+            !_api->OutfitApi->CopyPlayer(_unit, settings, race, gender, data.get()))
+            return TSOutfit(std::shared_ptr<TSOutfitData>(), _api ? _api->OutfitApi : nullptr);
+        return TSOutfit(std::move(data), _api->OutfitApi);
+    }
     void GossipMenuAddItem(std::uint32_t icon, std::string const& message, std::uint32_t sender = 0,
         std::uint32_t action = 0, bool code = false, std::string const& prompt = "",
         std::uint32_t money = 0) const
@@ -2126,6 +2299,7 @@ struct TSEvents
     // Appended to preserve offsets used by livescripts built against an older
     // event table. The concrete ABI lives in the public database header.
     void const* DatabaseApi = nullptr;
+    void const* OutfitApi = nullptr;
 
     void Clear()
     {

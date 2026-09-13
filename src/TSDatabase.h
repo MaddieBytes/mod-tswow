@@ -86,7 +86,11 @@ inline std::string Number(double value)
 }
 }
 
-inline void TSInitialize(TSEvents* events) { TSWoWDatabase::Initialize(events); }
+inline void TSInitialize(TSEvents* events)
+{
+    TSOutfitApiStorage() = events ? static_cast<TSOutfitApi const*>(events->OutfitApi) : nullptr;
+    TSWoWDatabase::Initialize(events);
+}
 
 class TSDatabaseResult
 {

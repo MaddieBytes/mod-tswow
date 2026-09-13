@@ -20,6 +20,7 @@
 #include "CustomPacketWrite.h"
 #include "Log.h"
 #include "Creature.h"
+#include "DBCStores.h"
 #include "DBCStructure.h"
 #include "DatabaseEnv.h"
 #include "GameObject.h"
@@ -56,6 +57,7 @@
 #include <iterator>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 #include <stdexcept>
 #include <unordered_map>
@@ -79,6 +81,8 @@ std::unordered_map<void*, std::unordered_map<std::string, std::uint32_t>> Battle
 std::unordered_map<std::uint32_t, std::uint32_t> PermanentTalentQuestRewards;
 std::unordered_map<std::uint64_t, std::array<std::uint32_t, MAX_STATS>> PlayerLevelStats;
 std::unordered_map<void*, std::unordered_map<std::string, std::shared_ptr<void>>> NativeObjectState;
+std::unordered_map<std::uint64_t, std::shared_ptr<TSOutfitData>> NativeOutfits;
+std::mutex NativeOutfitsMutex;
 
 struct NativeTimer
 {
@@ -209,6 +213,17 @@ void ClearNativeObjectState(void* owner)
     for (auto const& timer : NativeTimers)
         if (timer->Owner == owner)
             timer->Stopped = true;
+}
+
+void DetachNativeOutfitReferences()
+{
+    std::lock_guard<std::mutex> lock(NativeOutfitsMutex);
+    for (auto& [guid, outfit] : NativeOutfits)
+    {
+        (void)guid;
+        if (outfit)
+            outfit = std::make_shared<TSOutfitData>(*outfit);
+    }
 }
 
 struct NativeDatabaseResult
@@ -814,20 +829,126 @@ void RemoveCreatureCorpse(void* creature)
     static_cast<Creature*>(creature)->RemoveCorpse();
 }
 
-void ApplyPlayerOutfit(void* creatureHandle, void* playerHandle)
+std::uint32_t ResolveOutfitItemDisplay(std::uint32_t entry)
+{
+    ItemTemplate const* item = sObjectMgr->GetItemTemplate(entry);
+    return item ? item->DisplayInfoID : 0;
+}
+
+std::uint32_t ResolveOutfitDisplay(std::uint8_t race, std::uint8_t gender)
+{
+    ChrRacesEntry const* raceEntry = sChrRacesStore.LookupEntry(race);
+    if (!raceEntry)
+        raceEntry = sChrRacesStore.LookupEntry(RACE_HUMAN);
+    return gender == GENDER_FEMALE ? raceEntry->model_f : raceEntry->model_m;
+}
+
+bool CopyPlayerOutfit(void* playerHandle, std::uint32_t settings, std::int32_t race,
+    std::int32_t gender, TSOutfitData* output)
+{
+    Player* player = static_cast<Player*>(playerHandle);
+    if (!player || !output)
+        return false;
+
+    *output = TSOutfitData();
+    output->Race = race > 0 ? static_cast<std::uint8_t>(race) : player->getRace();
+    output->Gender = gender >= 0 ? static_cast<std::uint8_t>(gender) : player->getGender();
+    output->DisplayId = ResolveOutfitDisplay(output->Race, output->Gender);
+    if (race <= 0 && gender < 0)
+    {
+        output->Skin = player->GetByteValue(PLAYER_BYTES, 0);
+        output->Face = player->GetByteValue(PLAYER_BYTES, 1);
+        output->HairStyle = player->GetByteValue(PLAYER_BYTES, 2);
+        output->HairColor = player->GetByteValue(PLAYER_BYTES, 3);
+        output->FacialStyle = player->GetByteValue(PLAYER_BYTES_2, 0);
+    }
+    if (settings & Outfit::CLASS)
+        output->Class = player->getClass();
+    if (settings & Outfit::GUILD)
+        output->Guild = player->GetGuildId();
+
+    static constexpr std::array<std::pair<std::uint32_t, EquipmentSlots>, 10> armorSlots{{
+        {Outfit::HEAD, EQUIPMENT_SLOT_HEAD}, {Outfit::SHOULDERS, EQUIPMENT_SLOT_SHOULDERS},
+        {Outfit::BODY, EQUIPMENT_SLOT_BODY}, {Outfit::CHEST, EQUIPMENT_SLOT_CHEST},
+        {Outfit::WAIST, EQUIPMENT_SLOT_WAIST}, {Outfit::LEGS, EQUIPMENT_SLOT_LEGS},
+        {Outfit::FEET, EQUIPMENT_SLOT_FEET}, {Outfit::WRISTS, EQUIPMENT_SLOT_WRISTS},
+        {Outfit::HANDS, EQUIPMENT_SLOT_HANDS}, {Outfit::BACK, EQUIPMENT_SLOT_BACK}
+    }};
+    for (auto const& [flag, slot] : armorSlots)
+    {
+        if (!(settings & flag))
+            continue;
+        if (Item const* item = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+        {
+            std::uint32_t display = item->GetTemplate()->DisplayInfoID;
+            sScriptMgr->OnGlobalMirrorImageDisplayItem(item, display);
+            output->ItemDisplays[slot] = display;
+        }
+    }
+
+    if (settings & Outfit::MAINHAND)
+        output->Mainhand = player->GetUInt32Value(PLAYER_VISIBLE_ITEM_16_ENTRYID);
+    if (settings & Outfit::OFFHAND)
+        output->Offhand = player->GetUInt32Value(PLAYER_VISIBLE_ITEM_17_ENTRYID);
+    if (settings & Outfit::RANGED)
+        output->Ranged = player->GetUInt32Value(PLAYER_VISIBLE_ITEM_18_ENTRYID);
+    return true;
+}
+
+bool CopyCreatureOutfit(void* creatureHandle, std::uint32_t, std::int32_t, std::int32_t,
+    TSOutfitData* output)
 {
     Creature* creature = static_cast<Creature*>(creatureHandle);
-    Player* player = static_cast<Player*>(playerHandle);
-    if (!creature || !player)
+    if (!creature || !output)
+        return false;
+    std::lock_guard<std::mutex> lock(NativeOutfitsMutex);
+    auto found = NativeOutfits.find(creature->GetGUID().GetRawValue());
+    if (found == NativeOutfits.end())
+        return false;
+    if (!found->second)
+        return false;
+    *output = *found->second;
+    return true;
+}
+
+void ApplyNativeOutfit(void* creatureHandle, std::shared_ptr<TSOutfitData> const& input)
+{
+    Creature* creature = static_cast<Creature*>(creatureHandle);
+    if (!creature || !input)
         return;
 
-    // The stock mirror-image handler asks global modules for effective item
-    // displays, so mod-transmog appearances are included automatically.
-    player->AddAura(45204, creature);
-    creature->SetVirtualItem(0, player->GetUInt32Value(PLAYER_VISIBLE_ITEM_16_ENTRYID));
-    creature->SetVirtualItem(1, player->GetUInt32Value(PLAYER_VISIBLE_ITEM_17_ENTRYID));
-    creature->SetVirtualItem(2, player->GetUInt32Value(PLAYER_VISIBLE_ITEM_18_ENTRYID));
+    if (!input->DisplayId)
+        input->DisplayId = ResolveOutfitDisplay(input->Race, input->Gender);
+    TSOutfitData outfit = *input;
+    {
+        std::lock_guard<std::mutex> lock(NativeOutfitsMutex);
+        NativeOutfits[creature->GetGUID().GetRawValue()] = input;
+    }
+
+    if (outfit.Mainhand >= 0) creature->SetVirtualItem(0, outfit.Mainhand);
+    if (outfit.Offhand >= 0) creature->SetVirtualItem(1, outfit.Offhand);
+    if (outfit.Ranged >= 0) creature->SetVirtualItem(2, outfit.Ranged);
+    creature->RemoveAurasByType(SPELL_AURA_CLONE_CASTER);
+    creature->AddAura(45204, creature);
+    creature->SetUnitFlag2(UNIT_FLAG2_MIRROR_IMAGE);
+    creature->SetDisplayId(outfit.DisplayId);
+    creature->UpdateObjectVisibility(true);
 }
+
+void ApplyPlayerOutfit(void* creatureHandle, void* playerHandle)
+{
+    TSOutfitData outfit;
+    if (CopyPlayerOutfit(playerHandle, Outfit::EVERYTHING, -1, -1, &outfit))
+        ApplyNativeOutfit(creatureHandle, std::make_shared<TSOutfitData>(outfit));
+}
+
+TSOutfitApi const NativeOutfitApi{
+    &ResolveOutfitDisplay,
+    &ResolveOutfitItemDisplay,
+    &CopyPlayerOutfit,
+    &CopyCreatureOutfit,
+    &ApplyNativeOutfit,
+};
 
 void UpdateBattlegroundWorldState(void* battleground, std::uint32_t variable, std::uint32_t value)
 {
@@ -991,6 +1112,7 @@ TSUnitApi const UnitApi = {
     &MapApi,
     &ObjectStateApi,
     &ApplyPlayerOutfit,
+    &NativeOutfitApi,
 };
 
 TSPlayer WrapPlayer(Player* player)
@@ -1167,6 +1289,7 @@ void CloseLibrary(LibraryHandle library)
 void UnloadLivescripts()
 {
     ts_events.Clear();
+    DetachNativeOutfitReferences();
     NativeObjectState.clear();
     NativeTimers.clear();
     NativeDelayedCallbacks.clear();
@@ -2026,6 +2149,34 @@ public:
     }
 };
 
+void RewriteNativeOutfitPacket(WorldPacket const& source)
+{
+    if (source.GetOpcode() != SMSG_MIRRORIMAGE_DATA || source.size() < sizeof(std::uint64_t))
+        return;
+    std::uint64_t guid = 0;
+    std::memcpy(&guid, source.contents(), sizeof(guid));
+    TSOutfitData outfit;
+    {
+        std::lock_guard<std::mutex> lock(NativeOutfitsMutex);
+        auto found = NativeOutfits.find(guid);
+        if (found == NativeOutfits.end())
+            return;
+        if (!found->second)
+            return;
+        outfit = *found->second;
+    }
+
+    WorldPacket replacement(SMSG_MIRRORIMAGE_DATA, 68);
+    replacement << ObjectGuid(guid);
+    replacement << outfit.DisplayId << outfit.Race << outfit.Gender << outfit.Class;
+    replacement << outfit.Skin << outfit.Face << outfit.HairStyle << outfit.HairColor << outfit.FacialStyle;
+    replacement << static_cast<std::uint32_t>(outfit.Guild);
+    static constexpr std::array<std::uint8_t, 11> slots{{ 0, 2, 3, 4, 5, 6, 7, 8, 9, 14, 18 }};
+    for (std::uint8_t slot : slots)
+        replacement << outfit.ItemDisplays[slot];
+    const_cast<WorldPacket&>(source) = std::move(replacement);
+}
+
 class TsWowServerScript final : public ServerScript
 {
 public:
@@ -2061,6 +2212,7 @@ public:
 
     bool CanPacketSend(WorldSession* session, WorldPacket const& packet) override
     {
+        RewriteNativeOutfitPacket(packet);
         ts_events.WorldPacket.OnSendCallbacks.Fire(packet.GetOpcode(),
             TSWorldPacket(const_cast<WorldPacket*>(&packet), &WorldPacketApi),
             WrapPlayer(session ? session->GetPlayer() : nullptr));
@@ -2380,6 +2532,8 @@ public:
         if (Map* map = creature->GetMap())
             ts_events.Map.OnCreatureRemoveCallbacks.Fire(map->GetId(), TSMap(map, &MapApi), wrapped);
         ClearNativeObjectState(creature);
+        std::lock_guard<std::mutex> lock(NativeOutfitsMutex);
+        NativeOutfits.erase(creature->GetGUID().GetRawValue());
     }
 };
 
@@ -3351,6 +3505,7 @@ TSEvents ts_events;
 void Addmod_tswowScripts()
 {
     ts_events.DatabaseApi = &NativeDatabaseApi;
+    ts_events.OutfitApi = &NativeOutfitApi;
     ts_events.Player.OnReloadHandler = ReloadPlayers;
     ts_events.Creature.OnReloadHandler = ReloadCreatures;
     ts_events.GameObject.OnReloadHandler = ReloadGameObjects;
