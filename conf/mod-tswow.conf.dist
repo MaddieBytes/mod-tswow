@@ -1,0 +1,4 @@
+[worldserver]
+
+# Directory containing TSWoW livescript .dll or .so files.
+TSWoW.LivescriptDir = "./lib"
