@@ -1147,9 +1147,9 @@ TSPlayer WrapPlayer(Player* player)
     return TSPlayer(player, &PlayerApi, &UnitApi);
 }
 
-TSUnit WrapUnit(Unit* unit)
+TSUnit WrapUnit(WorldObject* object)
 {
-    return TSUnit(unit, &UnitApi, &PlayerApi);
+    return TSUnit(object ? object->ToUnit() : nullptr, &UnitApi, &PlayerApi);
 }
 
 TSCreature WrapCreature(Creature* creature)
