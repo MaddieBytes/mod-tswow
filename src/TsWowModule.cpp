@@ -829,6 +829,21 @@ void* GetMapBattleground(void* map)
     return battlegroundMap ? battlegroundMap->GetBG() : nullptr;
 }
 
+std::size_t GetMapPlayerCount(void* map)
+{
+    return static_cast<Map*>(map)->GetPlayers().getSize();
+}
+
+void* GetMapPlayerAt(void* map, std::size_t index)
+{
+    auto const& players = static_cast<Map*>(map)->GetPlayers();
+    if (index >= players.getSize())
+        return nullptr;
+    auto player = players.begin();
+    std::advance(player, index);
+    return player->GetSource();
+}
+
 void RespawnCreature(void* creature)
 {
     static_cast<Creature*>(creature)->Respawn();
@@ -1070,6 +1085,8 @@ TSBattlegroundApi const BattlegroundApi = {
 TSMapApi const MapApi = {
     &IsBattlegroundMap,
     &GetMapBattleground,
+    &GetMapPlayerCount,
+    &GetMapPlayerAt,
     &BattlegroundApi,
     &BattlegroundScoreApi,
     &ObjectStateApi,

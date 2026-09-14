@@ -306,6 +306,8 @@ struct TSMapApi
 {
     bool (*IsBG)(void*);
     void* (*GetBattleground)(void*);
+    std::size_t (*GetPlayerCount)(void*);
+    void* (*GetPlayerAt)(void*, std::size_t);
     TSBattlegroundApi const* BattlegroundApi;
     TSBattlegroundScoreApi const* BattlegroundScoreApi;
     TSObjectStateApi const* ObjectStateApi;
@@ -945,7 +947,17 @@ inline TSArray<TSPlayer> TSBattleground::GetPlayers() const
 
 inline TSArray<TSPlayer> TSMap::GetPlayers() const
 {
-    return ToBG().GetPlayers();
+    TSArray<TSPlayer> players;
+    if (!_api || !_map || !_api->GetPlayerCount || !_api->GetPlayerAt)
+        return players;
+    std::size_t const count = _api->GetPlayerCount(_map);
+    for (std::size_t index = 0; index < count; ++index)
+    {
+        if (void* player = _api->GetPlayerAt(_map, index))
+            players.push(TSPlayer(player, _api->BattlegroundApi->PlayerApi,
+                _api->BattlegroundApi->UnitApi));
+    }
+    return players;
 }
 
 class TSPacketWrite
